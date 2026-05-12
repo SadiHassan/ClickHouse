@@ -1,4 +1,4 @@
-#include "config_functions.h"
+#include <Functions/h3Common.h>
 
 #if USE_H3
 
@@ -12,12 +12,7 @@
 #include <IO/WriteHelpers.h>
 #include <base/range.h>
 
-#include <constants.h>
-#include <h3api.h>
-
-
 static constexpr size_t MAX_ARRAY_SIZE = 1 << 30;
-
 
 namespace DB
 {
@@ -26,6 +21,7 @@ namespace ErrorCodes
     extern const int ILLEGAL_TYPE_OF_ARGUMENT;
     extern const int ARGUMENT_OUT_OF_BOUND;
     extern const int TOO_LARGE_ARRAY_SIZE;
+    extern const int ILLEGAL_COLUMN;
 }
 
 namespace
@@ -36,7 +32,11 @@ class FunctionH3ToChildren : public IFunction
 public:
     static constexpr auto name = "h3ToChildren";
 
-    static FunctionPtr create(ContextPtr) { return std::make_shared<FunctionH3ToChildren>(); }
+    H3Validator validator;
+
+    explicit FunctionH3ToChildren(const ContextPtr & context) : validator(context) {}
+
+    static FunctionPtr create(ContextPtr context) { return std::make_shared<FunctionH3ToChildren>(context); }
 
     std::string getName() const override { return name; }
 
@@ -65,8 +65,32 @@ public:
 
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr &, size_t input_rows_count) const override
     {
-        const auto * col_hindex = arguments[0].column.get();
-        const auto * col_resolution = arguments[1].column.get();
+        auto non_const_arguments = arguments;
+        for (auto & argument : non_const_arguments)
+            argument.column = argument.column->convertToFullColumnIfConst();
+
+        const auto * col_hindex = checkAndGetColumn<ColumnUInt64>(non_const_arguments[0].column.get());
+        if (!col_hindex)
+            throw Exception(
+                ErrorCodes::ILLEGAL_COLUMN,
+                "Illegal type {} of argument {} of function {}. Must be UInt64.",
+                arguments[0].type->getName(),
+                1,
+                getName());
+
+        const auto & data_hindex = col_hindex->getData();
+
+        const auto * col_resolution = checkAndGetColumn<ColumnUInt8>(non_const_arguments[1].column.get());
+        if (!col_resolution)
+            throw Exception(
+                ErrorCodes::ILLEGAL_COLUMN,
+                "Illegal type {} of argument {} of function {}. Must be UInt8.",
+                arguments[1].type->getName(),
+                2,
+                getName());
+
+        const auto & data_resolution = col_resolution->getData();
+
 
         auto dst = ColumnArray::create(ColumnUInt64::create());
         auto & dst_data = dst->getData();
@@ -74,12 +98,10 @@ public:
         dst_offsets.resize(input_rows_count);
         auto current_offset = 0;
 
-        std::vector<H3Index> hindex_vec;
-
-        for (size_t row = 0; row < input_rows_count; row++)
+        for (size_t row = 0; row < input_rows_count; ++row)
         {
-            const UInt64 parent_hindex = col_hindex->getUInt(row);
-            const UInt8 child_resolution = col_resolution->getUInt(row);
+            const UInt64 parent_hindex = data_hindex[row];
+            const UInt8 child_resolution = data_resolution[row];
 
             if (child_resolution > MAX_H3_RES)
                 throw Exception(
@@ -87,13 +109,22 @@ public:
                     "The argument 'resolution' ({}) of function {} is out of bounds because the maximum resolution in H3 library is {}",
                     toString(child_resolution), getName(), toString(MAX_H3_RES));
 
-            const size_t vec_size = cellToChildrenSize(parent_hindex, child_resolution);
+            if (!validator.validateCell(parent_hindex))
+            {
+                dst_offsets[row] = current_offset;
+                continue;
+            }
+
+            int64_t children_size = 0;
+            cellToChildrenSize(parent_hindex, child_resolution, &children_size);
+            const size_t vec_size = static_cast<size_t>(children_size);
             if (vec_size > MAX_ARRAY_SIZE)
                 throw Exception(
                     ErrorCodes::TOO_LARGE_ARRAY_SIZE,
                     "The result of function {} (array of {} elements) will be too large with resolution argument = {}",
-                    getName(), toString(vec_size), toString(child_resolution));
+                    getName(), vec_size, toString(child_resolution));
 
+            std::vector<H3Index> hindex_vec;
             hindex_vec.resize(vec_size);
             cellToChildren(parent_hindex, child_resolution, hindex_vec.data());
 
@@ -115,9 +146,35 @@ public:
 
 }
 
-void registerFunctionH3ToChildren(FunctionFactory & factory)
+REGISTER_FUNCTION(H3ToChildren)
 {
-    factory.registerFunction<FunctionH3ToChildren>();
+    FunctionDocumentation::Description description = R"(
+Returns an array of child indexes for the given [H3](#h3-index) index at the specified resolution.
+    )";
+    FunctionDocumentation::Syntax syntax = "h3ToChildren(index, resolution)";
+    FunctionDocumentation::Arguments arguments = {
+        {"index", "Parent H3 index.", {"UInt64"}},
+        {"resolution", "Resolution of the child indexes with range `[0, 15]`.", {"UInt8"}}
+    };
+    FunctionDocumentation::ReturnedValue returned_value = {
+        "Returns an array of child H3 indexes at the specified resolution.",
+        {"Array(UInt64)"}
+    };
+    FunctionDocumentation::Examples examples = {
+        {
+            "Get child indexes at resolution 6",
+            "SELECT h3ToChildren(599405990164561919, 6) AS children",
+            R"(
+┌─children───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ [603909588852408319,603909588986626047,603909589120843775,603909589255061503,603909589389279231,603909589523496959,603909589657714687] │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+            )"
+        }
+    };
+    FunctionDocumentation::IntroducedIn introduced_in = {20, 3};
+    FunctionDocumentation::Category category = FunctionDocumentation::Category::Geo;
+    FunctionDocumentation documentation = {description, syntax, arguments, {}, returned_value, examples, introduced_in, category};
+    factory.registerFunction<FunctionH3ToChildren>(documentation);
 }
 
 }

@@ -1,6 +1,4 @@
-#ifdef HAS_RESERVED_IDENTIFIER
 #pragma clang diagnostic ignored "-Wreserved-identifier"
-#endif
 
 #if defined (OS_LINUX)
 #   include <sched.h>
@@ -8,15 +6,17 @@
 
 #include <iostream>
 #include <iomanip>
+#include <pcg_random.hpp>
 #include <Poco/Exception.h>
 #include <Common/HashTable/Hash.h>
 #include <Common/Stopwatch.h>
+#include <Common/randomSeed.h>
 #include <Core/Defines.h>
 
 
 static void setAffinity()
 {
-#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__sun)
+#if !defined(OS_DARWIN) && !defined(OS_FREEBSD) && !defined(__sun)
     cpu_set_t mask;
     CPU_ZERO(&mask);
     CPU_SET(0, &mask);
@@ -34,7 +34,8 @@ static void setAffinity()
 static inline ALWAYS_INLINE UInt64 rdtsc()
 {
 #if defined(__x86_64__)
-    UInt32 a, d;
+    UInt32 a;
+    UInt32 d;
     __asm__ volatile ("rdtsc" : "=a" (a), "=d" (d));
     return static_cast<UInt64>(a) | (static_cast<UInt64>(d) << 32);
 #else
@@ -192,25 +193,28 @@ static inline size_t tabulation(UInt64 x)
 }
 
 
+namespace
+{
+
 const size_t BUF_SIZE = 1024;
 
 using Source = std::vector<UInt64>;
 
 
-static void report(const char * name, size_t n, double elapsed, UInt64 tsc_diff, size_t res)
+void report(const char * name, size_t n, double elapsed, UInt64 tsc_diff, size_t res)
 {
     std::cerr << name << std::endl
-        << "Done in " << elapsed
-        << " (" << n / elapsed << " elem/sec."
-        << ", " << n * sizeof(UInt64) / elapsed / (1ULL << 30) << " GiB/sec."
-        << ", " << (tsc_diff * 1.0 / n) << " tick/elem)"
-        << "; res = " << res
-        << std::endl << std::endl;
+              << "Done in " << elapsed << " (" << static_cast<double>(n) / elapsed << " elem/sec."
+              << ", " << (static_cast<double>(n) * sizeof(UInt64)) / (elapsed * (1ULL << 30))
+              << " GiB/sec."
+              << ", " << static_cast<double>(tsc_diff) / static_cast<double>(n) << " tick/elem)"
+              << "; res = " << res << std::endl
+              << std::endl;
 }
 
 
 template <size_t Func(UInt64)>
-static inline void test(size_t n, const UInt64 * data, const char * name)
+inline void test(size_t n, const UInt64 * data, const char * name)
 {
     /// throughput. Calculations of hash functions from different values may overlap.
     {
@@ -253,8 +257,9 @@ static inline void test(size_t n, const UInt64 * data, const char * name)
     }
 }
 
+}
 
-int main(int argc, char ** argv)
+int mainEntryExampleIntHashesPerf(int argc, char ** argv)
 {
     size_t n = (std::stol(argv[1]) + (BUF_SIZE - 1)) / BUF_SIZE * BUF_SIZE;
     size_t method = argc <= 2 ? 0 : std::stol(argv[2]);
@@ -266,9 +271,9 @@ int main(int argc, char ** argv)
     {
         Stopwatch watch;
 
-        srand48(rdtsc());
+        pcg64 rng(randomSeed());
         for (size_t i = 0; i < BUF_SIZE; ++i)
-            data[i] = lrand48();
+            data[i] = rng();
 
         watch.stop();
         double elapsed = watch.elapsedSeconds();
@@ -283,7 +288,7 @@ int main(int argc, char ** argv)
 
     if (!method || method == 1) test<identity>  (n, data.data(), "0: identity");
     if (!method || method == 2) test<intHash32> (n, data.data(), "1: intHash32");
-#if !defined(__APPLE__) /// The difference in size_t: unsigned long on Linux, unsigned long long on Mac OS.
+#if !defined(OS_DARWIN) /// The difference in size_t: unsigned long on Linux, unsigned long long on Mac OS.
     if (!method || method == 3) test<intHash64> (n, data.data(), "2: intHash64");
 #endif
     if (!method || method == 4) test<hash3>     (n, data.data(), "3: two rounds");

@@ -2,82 +2,90 @@
 
 #include <IO/ReadHelpers.h>
 #include <IO/Operators.h>
+#include <IO/ReadBufferFromString.h>
 #include <Formats/FormatFactory.h>
 #include <Formats/verbosePrintString.h>
-#include <Formats/JSONEachRowUtils.h>
+#include <Formats/JSONUtils.h>
+#include <Formats/EscapingRuleUtils.h>
+#include <Formats/SchemaInferenceUtils.h>
 #include <Formats/registerWithNamesAndTypes.h>
 #include <DataTypes/NestedUtils.h>
 #include <DataTypes/Serializations/SerializationNullable.h>
+#include <DataTypes/DataTypeFactory.h>
+#include <DataTypes/DataTypeNullable.h>
+#include <Poco/JSON/Parser.h>
 
 namespace DB
 {
 
-namespace ErrorCodes
-{
-    extern const int INCORRECT_DATA;
-}
-
-
 JSONCompactEachRowRowInputFormat::JSONCompactEachRowRowInputFormat(
-    const Block & header_,
+    SharedHeader header_,
     ReadBuffer & in_,
     Params params_,
     bool with_names_,
     bool with_types_,
     bool yield_strings_,
     const FormatSettings & format_settings_)
-    : RowInputFormatWithNamesAndTypes(header_, in_, std::move(params_), with_names_, with_types_, format_settings_)
-    , yield_strings(yield_strings_)
+    : RowInputFormatWithNamesAndTypes(
+        header_,
+        in_,
+        params_,
+        false,
+        with_names_,
+        with_types_,
+        format_settings_,
+        std::make_unique<JSONCompactEachRowFormatReader>(in_, yield_strings_, format_settings_),
+        false,
+        format_settings_.json.compact_allow_variable_number_of_columns)
 {
 }
 
-void JSONCompactEachRowRowInputFormat::skipRowStartDelimiter()
+void JSONCompactEachRowRowInputFormat::syncAfterError()
 {
-    skipWhitespaceIfAny(*in);
-    assertChar('[', *in);
+    skipToUnescapedNextLineOrEOF(*in);
 }
 
-void JSONCompactEachRowRowInputFormat::skipFieldDelimiter()
+JSONCompactEachRowFormatReader::JSONCompactEachRowFormatReader(ReadBuffer & in_, bool yield_strings_, const FormatSettings & format_settings_)
+    : FormatWithNamesAndTypesReader(in_, format_settings_), yield_strings(yield_strings_)
 {
-    skipWhitespaceIfAny(*in);
-    assertChar(',', *in);
 }
 
-void JSONCompactEachRowRowInputFormat::skipRowEndDelimiter()
+void JSONCompactEachRowFormatReader::skipRowStartDelimiter()
+{
+    JSONUtils::skipArrayStart(*in);
+}
+
+void JSONCompactEachRowFormatReader::skipFieldDelimiter()
+{
+    JSONUtils::skipComma(*in);
+}
+
+void JSONCompactEachRowFormatReader::skipRowEndDelimiter()
 {
     skipWhitespaceIfAny(*in);
-    assertChar(']', *in);
+    JSONUtils::skipArrayEnd(*in);
+}
 
+void JSONCompactEachRowFormatReader::skipRowBetweenDelimiter()
+{
     skipWhitespaceIfAny(*in);
     if (!in->eof() && (*in->position() == ',' || *in->position() == ';'))
         ++in->position();
-
     skipWhitespaceIfAny(*in);
 }
 
-String JSONCompactEachRowRowInputFormat::readFieldIntoString()
+void JSONCompactEachRowFormatReader::skipField()
 {
     skipWhitespaceIfAny(*in);
-    String field;
-    readJSONString(field, *in);
-    return field;
+    skipJSONField(*in, "skipped_field", format_settings.json);
 }
 
-void JSONCompactEachRowRowInputFormat::skipField(size_t file_column)
-{
-    skipWhitespaceIfAny(*in);
-    skipJSONField(*in, column_mapping->names_of_columns[file_column]);
-}
-
-void JSONCompactEachRowRowInputFormat::skipHeaderRow()
+void JSONCompactEachRowFormatReader::skipHeaderRow()
 {
     skipRowStartDelimiter();
-    size_t i = 0;
     do
     {
-        if (i >= column_mapping->names_of_columns.size())
-            throw Exception(ErrorCodes::INCORRECT_DATA, "The number of columns in a row differs from the number of column names");
-        skipField(i++);
+        skipField();
         skipWhitespaceIfAny(*in);
     }
     while (checkChar(',', *in));
@@ -85,13 +93,31 @@ void JSONCompactEachRowRowInputFormat::skipHeaderRow()
     skipRowEndDelimiter();
 }
 
-std::vector<String> JSONCompactEachRowRowInputFormat::readHeaderRow()
+bool JSONCompactEachRowFormatReader::checkForSuffix()
+{
+    skipWhitespaceIfAny(*in);
+    /// Allow ',' and ';' after the last row.
+    if (!in->eof() && (*in->position() == ',' || *in->position() == ';'))
+        ++in->position();
+    skipWhitespaceIfAny(*in);
+    return in->eof();
+}
+
+void JSONCompactEachRowFormatReader::skipRow()
+{
+    JSONUtils::skipRowForJSONCompactEachRow(*in);
+}
+
+std::vector<String> JSONCompactEachRowFormatReader::readHeaderRow()
 {
     skipRowStartDelimiter();
     std::vector<String> fields;
+    String field;
     do
     {
-        fields.push_back(readFieldIntoString());
+        skipWhitespaceIfAny(*in);
+        readJSONString(field, *in, format_settings.json);
+        fields.push_back(field);
         skipWhitespaceIfAny(*in);
     }
     while (checkChar(',', *in));
@@ -100,18 +126,19 @@ std::vector<String> JSONCompactEachRowRowInputFormat::readHeaderRow()
     return fields;
 }
 
-bool JSONCompactEachRowRowInputFormat::readField(IColumn & column, const DataTypePtr & type, const SerializationPtr & serialization, bool /*is_last_file_column*/, const String & column_name)
+bool JSONCompactEachRowFormatReader::readField(IColumn & column, const DataTypePtr & type, const SerializationPtr & serialization, bool /*is_last_file_column*/, const String & column_name)
 {
     skipWhitespaceIfAny(*in);
-    return readFieldImpl(*in, column, type, serialization, column_name, format_settings, yield_strings);
+    return JSONUtils::readField(*in, column, type, serialization, column_name, format_settings, yield_strings);
 }
 
-void JSONCompactEachRowRowInputFormat::syncAfterError()
+bool JSONCompactEachRowFormatReader::checkForEndOfRow()
 {
-    skipToUnescapedNextLineOrEOF(*in);
+    skipWhitespaceIfAny(*in);
+    return !in->eof() && *in->position() == ']';
 }
 
-bool JSONCompactEachRowRowInputFormat::parseRowStartWithDiagnosticInfo(WriteBuffer & out)
+bool JSONCompactEachRowFormatReader::parseRowStartWithDiagnosticInfo(WriteBuffer & out)
 {
     skipWhitespaceIfAny(*in);
     if (!checkChar('[', *in))
@@ -123,12 +150,11 @@ bool JSONCompactEachRowRowInputFormat::parseRowStartWithDiagnosticInfo(WriteBuff
     return true;
 }
 
-bool JSONCompactEachRowRowInputFormat::parseFieldDelimiterWithDiagnosticInfo(WriteBuffer & out)
+bool JSONCompactEachRowFormatReader::parseFieldDelimiterWithDiagnosticInfo(WriteBuffer & out)
 {
     try
     {
-        skipWhitespaceIfAny(*in);
-        assertChar(',', *in);
+        JSONUtils::skipComma(*in);
     }
     catch (const DB::Exception &)
     {
@@ -150,7 +176,7 @@ bool JSONCompactEachRowRowInputFormat::parseFieldDelimiterWithDiagnosticInfo(Wri
     return true;
 }
 
-bool JSONCompactEachRowRowInputFormat::parseRowEndWithDiagnosticInfo(WriteBuffer & out)
+bool JSONCompactEachRowFormatReader::parseRowEndWithDiagnosticInfo(WriteBuffer & out)
 {
     skipWhitespaceIfAny(*in);
 
@@ -180,6 +206,47 @@ bool JSONCompactEachRowRowInputFormat::parseRowEndWithDiagnosticInfo(WriteBuffer
     return true;
 }
 
+JSONCompactEachRowRowSchemaReader::JSONCompactEachRowRowSchemaReader(
+    ReadBuffer & in_, bool with_names_, bool with_types_, bool yield_strings_, const FormatSettings & format_settings_)
+    : FormatWithNamesAndTypesSchemaReader(in_, format_settings_, with_names_, with_types_, &reader)
+    , reader(in_, yield_strings_, format_settings_)
+{
+}
+
+std::optional<DataTypes> JSONCompactEachRowRowSchemaReader::readRowAndGetDataTypesImpl()
+{
+    if (first_row)
+        first_row = false;
+    else
+    {
+        skipWhitespaceIfAny(in);
+        /// ',' and ';' are possible between the rows.
+        if (!in.eof() && (*in.position() == ',' || *in.position() == ';'))
+            ++in.position();
+    }
+
+    skipWhitespaceIfAny(in);
+    if (in.eof())
+        return {};
+
+    return JSONUtils::readRowAndGetDataTypesForJSONCompactEachRow(in, format_settings, &inference_info);
+}
+
+void JSONCompactEachRowRowSchemaReader::transformTypesIfNeeded(DataTypePtr & type, DataTypePtr & new_type)
+{
+    transformInferredJSONTypesIfNeeded(type, new_type, format_settings, &inference_info);
+}
+
+void JSONCompactEachRowRowSchemaReader::transformTypesFromDifferentFilesIfNeeded(DataTypePtr & type, DataTypePtr & new_type)
+{
+    transformInferredJSONTypesFromDifferentFilesIfNeeded(type, new_type, format_settings);
+}
+
+void JSONCompactEachRowRowSchemaReader::transformFinalTypeIfNeeded(DataTypePtr & type)
+{
+    transformFinalInferredJSONTypeIfNeeded(type, format_settings, &inference_info);
+}
+
 void registerInputFormatJSONCompactEachRow(FormatFactory & factory)
 {
     for (bool yield_strings : {true, false})
@@ -192,11 +259,37 @@ void registerInputFormatJSONCompactEachRow(FormatFactory & factory)
                 IRowInputFormat::Params params,
                 const FormatSettings & settings)
             {
-                return std::make_shared<JSONCompactEachRowRowInputFormat>(sample, buf, std::move(params), with_names, with_types, yield_strings, settings);
+                return std::make_shared<JSONCompactEachRowRowInputFormat>(std::make_unique<const Block>(sample), buf, std::move(params), with_names, with_types, yield_strings, settings);
             });
         };
 
         registerWithNamesAndTypes(yield_strings ? "JSONCompactStringsEachRow" : "JSONCompactEachRow", register_func);
+        markFormatWithNamesAndTypesSupportsSamplingColumns(yield_strings ? "JSONCompactStringsEachRow" : "JSONCompactEachRow", factory);
+    }
+}
+
+void registerJSONCompactEachRowSchemaReader(FormatFactory & factory)
+{
+    for (bool json_strings : {false, true})
+    {
+        auto register_func = [&](const String & format_name, bool with_names, bool with_types)
+        {
+            factory.registerSchemaReader(format_name, [=](ReadBuffer & buf, const FormatSettings & settings)
+            {
+                return std::make_shared<JSONCompactEachRowRowSchemaReader>(buf, with_names, with_types, json_strings, settings);
+            });
+            if (!with_types)
+            {
+                factory.registerAdditionalInfoForSchemaCacheGetter(format_name, [with_names](const FormatSettings & settings)
+                {
+                    auto result = getAdditionalFormatInfoByEscapingRule(settings, FormatSettings::EscapingRule::JSON);
+                    if (!with_names)
+                        result += fmt::format(", column_names_for_schema_inference={}", settings.column_names_for_schema_inference);
+                    return result;
+                });
+            }
+        };
+        registerWithNamesAndTypes(json_strings ? "JSONCompactStringsEachRow" : "JSONCompactEachRow", register_func);
     }
 }
 
@@ -209,9 +302,9 @@ void registerFileSegmentationEngineJSONCompactEachRow(FormatFactory & factory)
         /// the minimum of rows for segmentation engine according to
         /// parameters with_names and with_types.
         size_t min_rows = 1 + int(with_names) + int(with_types);
-        factory.registerFileSegmentationEngine(format_name, [min_rows](ReadBuffer & in, DB::Memory<> & memory, size_t min_chunk_size)
+        factory.registerFileSegmentationEngine(format_name, [min_rows](ReadBuffer & in, DB::Memory<> & memory, size_t min_bytes, size_t max_rows)
         {
-            return fileSegmentationEngineJSONCompactEachRow(in, memory, min_chunk_size, min_rows);
+            return JSONUtils::fileSegmentationEngineJSONCompactEachRow(in, memory, min_bytes, min_rows, max_rows);
         });
     };
 

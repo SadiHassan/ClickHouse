@@ -1,23 +1,20 @@
-/// Bug in GCC: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=59124
-#if !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Warray-bounds"
-#endif
-
 #include <Common/CompactArray.h>
 #include <IO/WriteBufferFromFile.h>
 #include <IO/ReadBufferFromFile.h>
 #include <filesystem>
 #include <string>
 #include <iostream>
-#include <fstream>
 #include <stdexcept>
 #include <cstdlib>
 #include <unistd.h>
 
+
 namespace fs = std::filesystem;
 
-static std::string createTmpPath(const std::string & filename)
+namespace
+{
+
+std::string createTmpPath(const std::string & filename)
 {
     char pattern[] = "/tmp/fileXXXXXX";
     char * dir = mkdtemp(pattern);
@@ -76,7 +73,7 @@ struct Test
                 << "(Error: " << ex.what() << ")\n";
             ok = false;
         }
-        catch (...)
+        catch (...) // Ok: test reports unknown failure
         {
             std::cout << "Test width=" << width << " bucket_count=" << bucket_count << " failed\n";
             ok = false;
@@ -227,7 +224,7 @@ struct Generator1
 {
     static UInt8 execute(size_t, size_t width)
     {
-        return (1 << width) - 1;
+        return static_cast<UInt8>((1 << width) - 1);
     }
 };
 
@@ -235,7 +232,7 @@ struct Generator2
 {
     static UInt8 execute(size_t i, size_t width)
     {
-        return (i >> 1) & ((1 << width) - 1);
+        return static_cast<UInt8>((i >> 1) & ((1 << width) - 1));
     }
 };
 
@@ -243,11 +240,11 @@ struct Generator3
 {
     static UInt8 execute(size_t i, size_t width)
     {
-        return (i * 17 + 31) % (1ULL << width);
+        return static_cast<UInt8>((i * 17 + 31) % (1ULL << width));
     }
 };
 
-static void runTests()
+void runTests()
 {
     std::cout << "Test set 1\n";
     TestSet<Generator1>::execute();
@@ -257,12 +254,10 @@ static void runTests()
     TestSet<Generator3>::execute();
 }
 
-int main()
+}
+
+int mainEntryExampleCompactArray(int, char **)
 {
     runTests();
     return 0;
 }
-
-#if !defined(__clang__)
-#pragma GCC diagnostic pop
-#endif

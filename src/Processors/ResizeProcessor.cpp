@@ -1,11 +1,20 @@
 #include <Processors/ResizeProcessor.h>
-#include <iostream>
+
+#include <Processors/Port.h>
 
 namespace DB
 {
 namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
+}
+
+/// TODO Check that there is non zero number of inputs and outputs.
+ResizeProcessor::ResizeProcessor(SharedHeader header, size_t num_inputs, size_t num_outputs)
+    : IProcessor(InputPorts(num_inputs, header), OutputPorts(num_outputs, header))
+    , current_input(inputs.begin())
+    , current_output(outputs.begin())
+{
 }
 
 ResizeProcessor::Status ResizeProcessor::prepare()
@@ -138,16 +147,16 @@ ResizeProcessor::Status ResizeProcessor::prepare()
     while (!is_end_input() && !is_end_output())
     {
         auto output = get_next_out();
-        auto input = get_next_input();
 
         if (output == outputs.end())
             return get_status_if_no_outputs();
 
+        auto input = get_next_input();
 
         if (input == inputs.end())
             return get_status_if_no_inputs();
 
-        output->push(input->pull());
+        output->pushData(input->pullData());
     }
 
     if (is_end_input())
@@ -157,7 +166,7 @@ ResizeProcessor::Status ResizeProcessor::prepare()
     return get_status_if_no_inputs();
 }
 
-IProcessor::Status ResizeProcessor::prepare(const PortNumbers & updated_inputs, const PortNumbers & updated_outputs)
+IProcessor::Status ResizeProcessor::prepare(const UpdatedInputPorts & updated_inputs, const UpdatedOutputPorts & updated_outputs)
 {
     if (!initialized)
     {
@@ -165,16 +174,20 @@ IProcessor::Status ResizeProcessor::prepare(const PortNumbers & updated_inputs, 
 
         for (auto & input : inputs)
         {
-            input.setNeeded();
+            input_port_index[&input] = input_ports.size();
             input_ports.push_back({.port = &input, .status = InputStatus::NotActive});
         }
 
         for (auto & output : outputs)
+        {
+            output_port_index[&output] = output_ports.size();
             output_ports.push_back({.port = &output, .status = OutputStatus::NotActive});
+        }
     }
 
-    for (const auto & output_number : updated_outputs)
+    for (const auto * output_port : updated_outputs)
     {
+        const auto output_number = output_port_index.at(output_port);
         auto & output = output_ports[output_number];
         if (output.port->isFinished())
         {
@@ -197,6 +210,13 @@ IProcessor::Status ResizeProcessor::prepare(const PortNumbers & updated_inputs, 
         }
     }
 
+    if (!is_reading_started && !waiting_outputs.empty())
+    {
+        for (auto & input : inputs)
+            input.setNeeded();
+        is_reading_started = true;
+    }
+
     if (num_finished_outputs == outputs.size())
     {
         for (auto & input : inputs)
@@ -205,8 +225,9 @@ IProcessor::Status ResizeProcessor::prepare(const PortNumbers & updated_inputs, 
         return Status::Finished;
     }
 
-    for (const auto & input_number : updated_inputs)
+    for (const auto * input_port : updated_inputs)
     {
+        const auto input_number = input_port_index.at(input_port);
         auto & input = input_ports[input_number];
         if (input.port->isFinished())
         {
@@ -261,24 +282,31 @@ IProcessor::Status ResizeProcessor::prepare(const PortNumbers & updated_inputs, 
     return Status::PortFull;
 }
 
-IProcessor::Status StrictResizeProcessor::prepare(const PortNumbers & updated_inputs, const PortNumbers & updated_outputs)
+IProcessor::Status StrictResizeProcessor::prepare(const UpdatedInputPorts & updated_inputs, const UpdatedOutputPorts & updated_outputs)
 {
     if (!initialized)
     {
         initialized = true;
 
         for (auto & input : inputs)
+        {
+            input_port_index[&input] = input_ports.size();
             input_ports.push_back({.port = &input, .status = InputStatus::NotActive, .waiting_output = -1});
+        }
 
         for (UInt64 i = 0; i < input_ports.size(); ++i)
             disabled_input_ports.push(i);
 
         for (auto & output : outputs)
+        {
+            output_port_index[&output] = output_ports.size();
             output_ports.push_back({.port = &output, .status = OutputStatus::NotActive});
+        }
     }
 
-    for (const auto & output_number : updated_outputs)
+    for (const auto * output_port : updated_outputs)
     {
+        const auto output_number = output_port_index.at(output_port);
         auto & output = output_ports[output_number];
         if (output.port->isFinished())
         {
@@ -311,8 +339,9 @@ IProcessor::Status StrictResizeProcessor::prepare(const PortNumbers & updated_in
 
     std::queue<UInt64> inputs_with_data;
 
-    for (const auto & input_number : updated_inputs)
+    for (const auto * input_port : updated_inputs)
     {
+        const auto input_number = input_port_index.at(input_port);
         auto & input = input_ports[input_number];
         if (input.port->isFinished())
         {
@@ -343,12 +372,12 @@ IProcessor::Status StrictResizeProcessor::prepare(const PortNumbers & updated_in
         inputs_with_data.pop();
 
         if (input_with_data.waiting_output == -1)
-            throw Exception("No associated output for input with data.", ErrorCodes::LOGICAL_ERROR);
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "No associated output for input with data");
 
         auto & waiting_output = output_ports[input_with_data.waiting_output];
 
         if (waiting_output.status == OutputStatus::NotActive)
-            throw Exception("Invalid status NotActive for associated output.", ErrorCodes::LOGICAL_ERROR);
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Invalid status NotActive for associated output");
 
         if (waiting_output.status != OutputStatus::Finished)
         {

@@ -17,7 +17,7 @@ public:
         Pos begin = pos;
         bool res = func();
         if (!res)
-          pos = begin;
+            pos = begin;
         return res;
     }
 
@@ -31,11 +31,11 @@ public:
         bool res = func();
         pos.decreaseDepth();
         if (!res)
-          pos = begin;
+            pos = begin;
         return res;
     }
 
-    bool parse(Pos & pos, ASTPtr & node, Expected & expected) override;  // -V1071
+    bool parse(Pos & pos, ASTPtr & node, Expected & expected) override;
 
 protected:
     virtual bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) = 0;

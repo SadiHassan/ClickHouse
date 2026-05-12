@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Tags: distributed
+# Tags: distributed, no-flaky-check
 
 set -ue
-
-unset CLICKHOUSE_LOG_COMMENT
 
 CURDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../shell_config.sh
@@ -11,8 +9,29 @@ CURDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 function check_log
 {
-${CLICKHOUSE_CLIENT} --format=JSONEachRow -nq "
-system flush logs;
+    # The gateway span (HTTPHandler / TCPHandler TracingContextHolder) is logged
+    # only when handleRequest() / runImpl() fully exits — after the response has
+    # already been sent to the client.  There is therefore a small window where
+    # the client has received the HTTP 200 but the span is not yet in the table.
+    # Retry a few times to let the background I/O thread finish.
+    # This fixes https://github.com/ClickHouse/ClickHouse/issues/67108 and https://github.com/ClickHouse/ClickHouse/issues/93452
+    for _retry in {1..20}; do
+        ${CLICKHOUSE_CLIENT} -q "system flush logs opentelemetry_span_log"
+        _gateway_count=$(${CLICKHOUSE_CLIENT} -q "
+            select count() from system.opentelemetry_span_log
+            where finish_date >= yesterday()
+              AND trace_id = UUIDNumToString(toFixedString(unhex('$trace_id'), 16))
+              and parent_span_id = reinterpretAsUInt64(unhex('73'))
+        ")
+        if [[ "$_gateway_count" -gt 0 ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+
+${CLICKHOUSE_CLIENT} --format=JSONEachRow -q "
+set enable_analyzer = 1;
+-- Spans are already flushed by the retry loop above.
 
 -- Show queries sorted by start time.
 select attribute['db.statement'] as query,
@@ -20,7 +39,7 @@ select attribute['db.statement'] as query,
        attribute['clickhouse.tracestate'] as tracestate,
        1 as sorted_by_start_time
     from system.opentelemetry_span_log
-    where trace_id = reinterpretAsUUID(reverse(unhex('$trace_id')))
+    where finish_date >= yesterday() AND trace_id = UUIDNumToString(toFixedString(unhex('$trace_id'), 16))
         and operation_name = 'query'
     order by start_time_us
     ;
@@ -31,7 +50,7 @@ select attribute['db.statement'] as query,
        attribute['clickhouse.tracestate'] as tracestate,
        1 as sorted_by_finish_time
     from system.opentelemetry_span_log
-    where trace_id = reinterpretAsUUID(reverse(unhex('$trace_id')))
+    where finish_date >= yesterday() AND trace_id = UUIDNumToString(toFixedString(unhex('$trace_id'), 16))
         and operation_name = 'query'
     order by finish_time_us
     ;
@@ -43,26 +62,21 @@ select count(*) "'"'"total spans"'"'",
         uniqExactIf(parent_span_id, parent_span_id != 0)
             "'"'"unique non-zero parent spans"'"'"
     from system.opentelemetry_span_log
-    where trace_id = reinterpretAsUUID(reverse(unhex('$trace_id')))
+    where finish_date >= yesterday() AND trace_id = UUIDNumToString(toFixedString(unhex('$trace_id'), 16))
         and operation_name = 'query'
     ;
 
 -- Also check that the initial query span in ClickHouse has proper parent span.
+-- the first span should be child of input trace context
+-- the 2nd span should be the 'query' span
 select count(*) "'"'"initial query spans with proper parent"'"'"
-    from
-        (select *, attribute_name, attribute_value
-            from system.opentelemetry_span_log
-                array join mapKeys(attribute) as attribute_name,
-                     mapValues(attribute) as attribute_value) o
-        join system.query_log on query_id = o.attribute_value
-    where
-        trace_id = reinterpretAsUUID(reverse(unhex('$trace_id')))
-        and current_database = currentDatabase()
+    from system.opentelemetry_span_log
+    where finish_date >= yesterday() AND
+        trace_id = UUIDNumToString(toFixedString(unhex('$trace_id'), 16))
         and operation_name = 'query'
-        and parent_span_id = reinterpretAsUInt64(unhex('73'))
-        and o.attribute_name = 'clickhouse.query_id'
-        and is_initial_query
-        and type = 'QueryFinish'
+        and parent_span_id in (
+           select span_id from system.opentelemetry_span_log where finish_date >= yesterday() AND trace_id = UUIDNumToString(toFixedString(unhex('$trace_id'), 16)) and parent_span_id = reinterpretAsUInt64(unhex('73'))
+        )
     ;
 
 -- Check that the tracestate header was propagated. It must have exactly the
@@ -70,8 +84,8 @@ select count(*) "'"'"initial query spans with proper parent"'"'"
 select uniqExact(value) "'"'"unique non-empty tracestate values"'"'"
     from system.opentelemetry_span_log
         array join mapKeys(attribute) as name,  mapValues(attribute) as value
-    where
-        trace_id = reinterpretAsUUID(reverse(unhex('$trace_id')))
+    where finish_date >= yesterday() AND
+        trace_id = UUIDNumToString(toFixedString(unhex('$trace_id'), 16))
         and operation_name = 'query'
         and name = 'clickhouse.tracestate'
         and length(value) > 0
@@ -81,7 +95,7 @@ select uniqExact(value) "'"'"unique non-empty tracestate values"'"'"
 
 # Generate some random trace id so that the prevous runs of the test do not interfere.
 echo "===http==="
-trace_id=$(${CLICKHOUSE_CLIENT} -q "select lower(hex(reverse(reinterpretAsString(generateUUIDv4()))))")
+trace_id=$(${CLICKHOUSE_CLIENT} -q "select lower(hex(reverse(reinterpretAsString(generateUUIDv4())))) settings enable_analyzer = 1")
 
 # Check that the HTTP traceparent is read, and then passed through `remote`
 # table function. We expect 4 queries -- one initial, one SELECT and two
@@ -91,7 +105,7 @@ ${CLICKHOUSE_CURL} \
     --header "traceparent: 00-$trace_id-0000000000000073-01" \
     --header "tracestate: some custom state" "$CLICKHOUSE_URL" \
     --get \
-    --data-urlencode "query=select 1 from remote('127.0.0.2', system, one) format Null"
+    --data-urlencode "query=select 1 from remote('127.0.0.2', system, one) settings enable_analyzer = 1 format Null"
 
 check_log
 
@@ -113,7 +127,7 @@ check_log
 echo "===sampled==="
 query_id=$(${CLICKHOUSE_CLIENT} -q "select lower(hex(reverse(reinterpretAsString(generateUUIDv4()))))")
 
-for i in {1..20}
+for i in {1..40}
 do
     ${CLICKHOUSE_CLIENT} \
         --opentelemetry_start_trace_probability=0.5 \
@@ -130,13 +144,14 @@ do
 done
 wait
 
-${CLICKHOUSE_CLIENT} -q "system flush logs"
+${CLICKHOUSE_CLIENT} -q "system flush logs opentelemetry_span_log"
 ${CLICKHOUSE_CLIENT} -q "
-    -- expect 20 * 0.5 = 10 sampled events on average
-    select if(2 <= count() and count() <= 18, 'OK', 'Fail')
+    -- expect 40 * 0.5 = 20 sampled events on average;
+    -- probability of getting 0, 1, 39, or 40 sampled events: 82/2^40 = 1 in 13.4 B runs;
+    -- if there are 10k tests run 1k times per day, that's a false positive every 3.7 years
+    select if(2 <= count() and count() <= 38, 'OK', 'Fail')
     from system.opentelemetry_span_log
-    where operation_name = 'query'
-        and parent_span_id = 0  -- only account for the initial queries
+    where finish_date >= yesterday() AND operation_name = 'query'
         and attribute['clickhouse.query_id'] like '$query_id-%'
     ;
 "

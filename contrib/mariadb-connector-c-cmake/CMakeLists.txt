@@ -1,10 +1,21 @@
+if((OS_LINUX OR OS_DARWIN) AND TARGET OpenSSL::SSL)
+    option(ENABLE_MYSQL "Enable MySQL" ${ENABLE_LIBRARIES})
+else ()
+    option(ENABLE_MYSQL "Enable MySQL" FALSE)
+endif ()
+
+if(NOT ENABLE_MYSQL)
+    message (STATUS "Build without mysqlclient (support for MYSQL dictionary source will be disabled)")
+    return()
+endif()
+
 if (GLIBC_COMPATIBILITY)
     set(LIBM glibc-compatibility)
 endif()
 
 # This is the LGPL libmariadb project.
 
-set(CC_SOURCE_DIR ${CMAKE_SOURCE_DIR}/contrib/mariadb-connector-c)
+set(CC_SOURCE_DIR ${PROJECT_SOURCE_DIR}/contrib/mariadb-connector-c)
 set(CC_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
 set(WITH_SSL ON)
@@ -39,7 +50,11 @@ if(NOT MARIADB_UNIX_ADDR)
   set(MARIADB_UNIX_ADDR "/tmp/mysql.sock")
 endif()
 
-set(HAVE_ALLOCA_H 1)
+if (OS_FREEBSD)
+  set(HAVE_ALLOCA_H 0)
+else()
+  set(HAVE_ALLOCA_H 1)
+endif()
 set(HAVE_ARPA_INET_H 1)
 set(HAVE_DLFCN_H 1)
 set(HAVE_FCNTL_H 1)
@@ -62,7 +77,7 @@ set(HAVE_SYS_TYPES_H 1)
 set(HAVE_SYS_UN_H 1)
 set(HAVE_UNISTD_H 1)
 set(HAVE_UTIME_H 1)
-set(HAVE_UCONTEXT_H 1)
+set(HAVE_UCONTEXT_H 0)
 set(HAVE_ALLOCA 1)
 set(HAVE_DLERROR 0)
 set(HAVE_DLOPEN 0)
@@ -80,7 +95,7 @@ set(SIZEOF_SIZE_T 8)
 set(SOCKET_SIZE_TYPE socklen_t)
 
 
-set(SYSTEM_LIBS ${SYSTEM_LIBS} zlib)
+set(SYSTEM_LIBS ${SYSTEM_LIBS} ch_contrib::zlib)
 
 if(CMAKE_HAVE_PTHREAD_H)
   set(CMAKE_REQUIRED_INCLUDES pthread.h)
@@ -93,8 +108,7 @@ set(HAVE_THREADS 1)
 set(DEFAULT_CHARSET "utf8mb4")
 
 add_definitions(-DHAVE_OPENSSL -DHAVE_TLS)
-set(SSL_LIBRARIES ${OPENSSL_SSL_LIBRARY} ${OPENSSL_CRYPTO_LIBRARY})
-include_directories(BEFORE ${OPENSSL_INCLUDE_DIR})
+set(SSL_LIBRARIES OpenSSL::Crypto OpenSSL::SSL)
 set(TLS_LIBRARY_VERSION "OpenSSL ${OPENSSL_VERSION}")
 
 set(ENABLED_LOCAL_INFILE OFF)
@@ -106,9 +120,13 @@ CONFIGURE_FILE(${CC_SOURCE_DIR}/include/ma_config.h.in
 CONFIGURE_FILE(${CC_SOURCE_DIR}/include/mariadb_version.h.in
                ${CC_BINARY_DIR}/include-public/mariadb_version.h)
 
-if(WITH_SSL)
+if (WITH_SSL)
   set(SYSTEM_LIBS ${SYSTEM_LIBS} ${SSL_LIBRARIES})
-endif()
+endif ()
+
+if (OS_DARWIN)
+  set(SYSTEM_LIBS ${SYSTEM_LIBS} iconv)
+endif ()
 
 
 function(REGISTER_PLUGIN)
@@ -217,27 +235,23 @@ ${CC_SOURCE_DIR}/libmariadb/secure/openssl_crypt.c
 ${CC_BINARY_DIR}/libmariadb/ma_client_plugin.c
 )
 
-if(ICONV_INCLUDE_DIR)
-   include_directories(BEFORE ${ICONV_INCLUDE_DIR})
-endif()
 add_definitions(-DLIBICONV_PLUG)
-
-if(ZLIB_FOUND AND WITH_EXTERNAL_ZLIB)
-  include_directories(${ZLIB_INCLUDE_DIR})
-endif()
-
-if(WITH_DYNCOL)
-  set(LIBMARIADB_SOURCES ${LIBMARIADB_SOURCES} ${CC_SOURCE_DIR}/libmariadb/mariadb_dyncol.c)
-endif()
 
 set(LIBMARIADB_SOURCES ${LIBMARIADB_SOURCES} ${CC_SOURCE_DIR}/libmariadb/mariadb_async.c ${CC_SOURCE_DIR}/libmariadb/ma_context.c)
 
 
-add_library(mariadbclient STATIC ${LIBMARIADB_SOURCES})
-target_link_libraries(mariadbclient ${SYSTEM_LIBS})
+add_library(_mariadbclient ${LIBMARIADB_SOURCES})
+target_link_libraries(_mariadbclient ${SYSTEM_LIBS})
 
-target_include_directories(mariadbclient
-    PRIVATE ${CC_BINARY_DIR}/include-private
-    PUBLIC ${CC_BINARY_DIR}/include-public ${CC_SOURCE_DIR}/include ${CC_SOURCE_DIR}/libmariadb)
+target_include_directories(_mariadbclient PRIVATE ${CC_BINARY_DIR}/include-private)
+target_include_directories(_mariadbclient SYSTEM PUBLIC ${CC_BINARY_DIR}/include-public ${CC_SOURCE_DIR}/include ${CC_SOURCE_DIR}/libmariadb)
 
-set_target_properties(mariadbclient PROPERTIES IMPORTED_INTERFACE_LINK_LIBRARIES "${SYSTEM_LIBS}")
+set_target_properties(_mariadbclient PROPERTIES IMPORTED_INTERFACE_LINK_LIBRARIES "${SYSTEM_LIBS}")
+# NOTE: revert it once https://github.com/llvm/llvm-project/issues/173168 will be resolved
+target_compile_options(_mariadbclient
+    PRIVATE
+        -Wno-incompatible-pointer-types
+)
+
+
+add_library(ch_contrib::mariadbclient ALIAS _mariadbclient)

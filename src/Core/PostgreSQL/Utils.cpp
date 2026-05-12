@@ -1,4 +1,4 @@
-#include "Utils.h"
+#include <Core/PostgreSQL/Utils.h>
 
 #if USE_LIBPQXX
 
@@ -8,7 +8,7 @@
 namespace postgres
 {
 
-ConnectionInfo formatConnectionString(String dbname, String host, UInt16 port, String user, String password)
+ConnectionInfo formatConnectionString(String dbname, String host, UInt16 port, String user, String password, UInt64 timeout)
 {
     DB::WriteBufferFromOwnString out;
     out << "dbname=" << DB::quote << dbname
@@ -16,8 +16,8 @@ ConnectionInfo formatConnectionString(String dbname, String host, UInt16 port, S
         << " port=" << port
         << " user=" << DB::quote << user
         << " password=" << DB::quote << password
-        << " connect_timeout=10";
-    return std::make_pair(out.str(), host + ':' + DB::toString(port));
+        << " connect_timeout=" << timeout;
+    return {out.str(), host + ':' + DB::toString(port)};
 }
 
 String getConnectionForLog(const String & host, UInt16 port)

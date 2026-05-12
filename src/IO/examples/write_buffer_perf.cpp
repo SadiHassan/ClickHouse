@@ -8,14 +8,14 @@
 #include <IO/WriteBufferFromOStream.h>
 
 
-int main(int, char **)
+int mainEntryExampleWriteBufferPerf(int, char **)
 {
     try
     {
-        DB::Int64 a = -123456;
-        DB::Float64 b = 123.456;
-        DB::String c = "вася пе\tтя";
-        DB::String d = "'xyz\\";
+        Int64 a = -123456;
+        Float64 b = 123.456;
+        String c = "вася pe\ttya";
+        String d = "'xyz\\";
 
         std::ofstream s("test");
         DB::WriteBufferFromOStream out(s);

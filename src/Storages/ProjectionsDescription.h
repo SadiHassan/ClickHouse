@@ -1,28 +1,35 @@
 #pragma once
 
 #include <Core/Types.h>
-
-#include <memory>
-#include <vector>
-#include <Interpreters/ExpressionActions.h>
 #include <Interpreters/AggregateDescription.h>
 #include <Parsers/IAST_fwd.h>
 #include <Storages/ColumnsDescription.h>
+#include <Storages/MergeTree/ProjectionIndex/IProjectionIndex.h>
+#include <Storages/VirtualColumnsDescription.h>
+#include <Common/PODArray_fwd.h>
 
-#include <boost/multi_index/member.hpp>
-#include <boost/multi_index/ordered_index.hpp>
-#include <boost/multi_index/sequenced_index.hpp>
-#include <boost/multi_index_container.hpp>
+#include <memory>
+#include <vector>
 
 namespace DB
 {
+
+class ExpressionActions;
+using ExpressionActionsPtr = std::shared_ptr<ExpressionActions>;
+
 struct StorageInMemoryMetadata;
 using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
+
+using IColumnPermutation = PaddedPODArray<size_t>;
+
+struct KeyDescription;
+
+class ASTProjectionSelectQuery;
 
 /// Description of projections for Storage
 struct ProjectionDescription
 {
-    enum class Type
+    enum class Type : uint8_t
     {
         Normal,
         Aggregate,
@@ -56,8 +63,6 @@ struct ProjectionDescription
 
     size_t key_size = 0;
 
-    bool is_minmax_count_projection = false;
-
     /// If a primary key expression is used in the minmax_count projection, store the name of max expression.
     String primary_key_max_column_name;
 
@@ -67,16 +72,36 @@ struct ProjectionDescription
     /// partition columns.
     std::vector<size_t> partition_value_indices;
 
+    bool with_parent_part_offset = false;
+    bool with_block_number = false;
+    bool with_block_offset = false;
+
+    ProjectionIndexPtr index;
+
+    std::optional<UInt64> index_granularity;
+    std::optional<UInt64> index_granularity_bytes;
+
     /// Parse projection from definition AST
-    static ProjectionDescription
-    getProjectionFromAST(const ASTPtr & definition_ast, const ColumnsDescription & columns, ContextPtr query_context);
+    static ProjectionDescription getProjectionFromAST(
+        const ASTPtr & definition_ast,
+        const ColumnsDescription & columns,
+        const KeyDescription * partition_key,
+        const ContextPtr & query_context);
+
+    static void fillProjectionDescriptionByQuery(
+        ProjectionDescription & result,
+        const ASTProjectionSelectQuery & query,
+        const ColumnsDescription & columns,
+        const KeyDescription * partition_key,
+        const ContextPtr & query_context);
 
     static ProjectionDescription getMinMaxCountProjection(
         const ColumnsDescription & columns,
         const ASTPtr & partition_columns,
         const Names & minmax_columns,
-        const ASTs & primary_key_asts,
-        ContextPtr query_context);
+        const KeyDescription & primary_key,
+        const KeyDescription * partition_key,
+        const ContextPtr & query_context);
 
     ProjectionDescription() = default;
 
@@ -89,16 +114,35 @@ struct ProjectionDescription
 
     ProjectionDescription clone() const;
 
+    void loadSettings(const SettingsChanges & changes);
+
     bool operator==(const ProjectionDescription & other) const;
     bool operator!=(const ProjectionDescription & other) const { return !(*this == other); }
 
-    /// Recalculate projection with new columns because projection expression may change
-    /// if something change in columns.
-    void recalculateWithNewColumns(const ColumnsDescription & new_columns, ContextPtr query_context);
-
     bool isPrimaryKeyColumnPossiblyWrappedInFunctions(const ASTPtr & node) const;
 
-    Block calculate(const Block & block, ContextPtr context) const;
+    /**
+     * @brief Calculates the projection result for a given input block.
+     *
+     * @param block The input block used to evaluate the projection.
+     * @param starting_offset The absolute starting row index of the current `block` within the
+     *        source data part. It is used to calculate the value of the virtual `_part_offset`
+     *        column (i.e., `_part_offset = starting_offset + row_index`). This column is
+     *        essential for mapping projection rows back to their original positions in the
+     *        parent part during merge or mutation.
+     * @param context The query context. A copy will be made internally with adjusted settings.
+     * @param perm_ptr Optional pointer to a permutation vector. If provided, it is used to map
+     *        the output rows back to their original order in the parent block. This is necessary
+     *        when generating the `_part_offset` column, which acts as `_parent_part_offset` in
+     *        the projection index and reflects the position of each row in the parent part.
+     *
+     * @return The resulting block after executing the projection query.
+     */
+    Block calculate(const Block & block, UInt64 starting_offset, ContextPtr context, const IColumnPermutation * perm_ptr = nullptr) const;
+
+    /// Same as but ignores additional index-specific metadata or structures.
+    /// Only the query AST is used to compute the output block.
+    Block calculateByQuery(const Block & block, UInt64 starting_offset, ContextPtr context, const IColumnPermutation * perm_ptr = nullptr) const;
 
     String getDirectoryName() const { return name + ".proj"; }
 };
@@ -106,7 +150,7 @@ struct ProjectionDescription
 using ProjectionDescriptionRawPtr = const ProjectionDescription *;
 
 /// All projections in storage
-struct ProjectionsDescription
+struct ProjectionsDescription : public IHints<>
 {
     ProjectionsDescription() = default;
     ProjectionsDescription(ProjectionsDescription && other) = default;
@@ -117,7 +161,11 @@ struct ProjectionsDescription
     /// Convert description to string
     String toString() const;
     /// Parse description from string
-    static ProjectionsDescription parse(const String & str, const ColumnsDescription & columns, ContextPtr query_context);
+    static ProjectionsDescription parse(
+        const String & str,
+        const ColumnsDescription & columns,
+        const KeyDescription * parent_partition_key,
+        const ContextPtr & query_context);
 
     /// Return common expression for all stored projections
     ExpressionActionsPtr getSingleExpressionForProjections(const ColumnsDescription & columns, ContextPtr query_context) const;
@@ -137,6 +185,8 @@ struct ProjectionsDescription
     void
     add(ProjectionDescription && projection, const String & after_projection = String(), bool first = false, bool if_not_exists = false);
     void remove(const String & projection_name, bool if_exists);
+
+    std::vector<String> getAllRegisteredNames() const override;
 
 private:
     /// Keep the sequence of columns and allow to lookup by name.

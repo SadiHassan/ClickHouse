@@ -1,7 +1,9 @@
 #pragma once
 
+#include <Columns/IColumn_fwd.h>
+#include <Core/Names.h>
 #include <Core/NamesAndTypes.h>
-
+#include <DataTypes/IDataType.h>
 
 namespace DB
 {
@@ -14,7 +16,7 @@ class RowInputMissingColumnsFiller
 {
 public:
     /// Makes a column filler which checks nested structures while adding default values to columns.
-    RowInputMissingColumnsFiller(const NamesAndTypesList & names_and_types);
+    explicit RowInputMissingColumnsFiller(const NamesAndTypesList & names_and_types);
     RowInputMissingColumnsFiller(const Names & names, const DataTypes & types);
     RowInputMissingColumnsFiller(size_t count, const std::string_view * names, const DataTypePtr * types);
 
@@ -27,6 +29,8 @@ public:
     /// the function will add a default value to this column.
     void addDefaults(MutableColumns & columns, size_t row_num) const;
 
+    const NamesAndTypesList & getNamesAndTypes() const;
+
 private:
     void setNestedGroups(std::unordered_map<std::string_view, std::vector<size_t>> && nested_groups, size_t num_columns);
 
@@ -35,6 +39,7 @@ private:
         std::shared_ptr<std::vector<size_t>> nested_group;
     };
     std::vector<ColumnInfo> column_infos;
+    NamesAndTypesList names_and_types;
 };
 
 }

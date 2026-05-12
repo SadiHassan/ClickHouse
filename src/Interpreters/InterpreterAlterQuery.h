@@ -15,16 +15,18 @@ class ASTAlterQuery;
 /** Allows you add or remove a column in the table.
   * It also allows you to manipulate the partitions of the MergeTree family tables.
   */
-class InterpreterAlterQuery : public IInterpreter, WithContext
+class InterpreterAlterQuery : public IInterpreter, WithMutableContext
 {
 public:
-    InterpreterAlterQuery(const ASTPtr & query_ptr_, ContextPtr context_);
+    InterpreterAlterQuery(const ASTPtr & query_ptr_, ContextMutablePtr context_);
 
     BlockIO execute() override;
 
     static AccessRightsElements getRequiredAccessForCommand(const ASTAlterCommand & command, const String & database, const String & table);
 
     void extendQueryLogElemImpl(QueryLogElement & elem, const ASTPtr & ast, ContextPtr context) const override;
+
+    bool supportsTransactions() const override { return true; }
 
 private:
     AccessRightsElements getRequiredAccess() const;

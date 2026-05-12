@@ -12,7 +12,7 @@
 
 using namespace DB;
 
-int main(int argc, char **argv)
+int mainEntryExampleExecutableUdf(int argc, char **argv)
 {
     (void)(argc);
     (void)(argv);
@@ -41,6 +41,8 @@ int main(int argc, char **argv)
 
         write_buffer.next();
     }
+
+    write_buffer.finalize();
 
     return 0;
 }

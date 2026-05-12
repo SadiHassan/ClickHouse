@@ -1,12 +1,11 @@
 SET send_logs_level = 'fatal';
-SET allow_experimental_map_type = 1;
 
 DROP TABLE IF EXISTS map_comb;
 CREATE TABLE map_comb(a int, statusMap Map(UInt16, UInt32)) ENGINE = Log;
 
 INSERT INTO map_comb VALUES (1, map(1, 10, 2, 10, 3, 10)),(1, map(3, 10, 4, 10, 5, 10)),(2, map(4, 10, 5, 10, 6, 10)),(2, map(6, 10, 7, 10, 8, 10)),(3, map(1, 10, 2, 10, 3, 10)),(4, map(3, 10, 4, 10, 5, 10)),(5, map(4, 10, 5, 10, 6, 10)),(5, map(6, 10, 7, 10, 8, 10));
 
-SELECT * FROM map_comb ORDER BY a;
+SELECT * FROM map_comb ORDER BY a, statusMap;
 SELECT toTypeName(res), sumMap(statusMap) as res FROM map_comb;
 SELECT toTypeName(res), sumWithOverflowMap(statusMap) as res FROM map_comb;
 SELECT toTypeName(res), sumMapMerge(s) as res FROM (SELECT sumMapState(statusMap) AS s FROM map_comb);
@@ -26,7 +25,7 @@ select minMap(val) from values ('val Map(String, String)',  (map('1', '1')), (ma
 select minMap(val) from values ('val Map(FixedString(1), FixedString(1))',  (map('1', '1')), (map('1', '2')));
 select minMap(val) from values ('val Map(UInt64, UInt64)',  (map(1, 1)), (map(1, 2)));
 select minMap(val) from values ('val Map(Date, Int16)',  (map(1, 1)), (map(1, 2)));
-select minMap(val) from values ('val Map(DateTime(\'Europe/Moscow\'), Int32)',  (map(1, 1)), (map(1, 2)));
+select minMap(val) from values ('val Map(DateTime(\'Asia/Istanbul\'), Int32)',  (map(1, 1)), (map(1, 2)));
 select minMap(val) from values ('val Map(Enum16(\'a\'=1), Int16)',  (map('a', 1)), (map('a', 2)));
 select maxMap(val) from values ('val Map(String, String)',  (map('1', '1')), (map('1', '2')));
 select minMap(val) from values ('val Map(Int128, Int128)',  (map(1, 1)), (map(1, 2)));
@@ -34,16 +33,16 @@ select minMap(val) from values ('val Map(Int256, Int256)',  (map(1, 1)), (map(1,
 select minMap(val) from values ('val Map(UInt128, UInt128)',  (map(1, 1)), (map(1, 2)));
 select minMap(val) from values ('val Map(UInt256, UInt256)',  (map(1, 1)), (map(1, 2)));
 
-select sumMap(map(1,2), 1, 2); -- { serverError 42 }
-select sumMap(map(1,2), map(1,3)); -- { serverError 42 }
+select sumMap(map(1,2), 1, 2); -- { serverError NUMBER_OF_ARGUMENTS_DOESNT_MATCH }
+select sumMap(map(1,2), map(1,3)); -- { serverError NUMBER_OF_ARGUMENTS_DOESNT_MATCH }
 
 -- array and tuple arguments
-select avgMap([1,1,1], [2,2,2]); -- { serverError 43 }
-select minMap((1,1)); -- { serverError 43 }
-select minMap(([1,1,1],1)); -- { serverError 43 }
-select minMap([1,1,1],1); -- { serverError 43 }
-select minMap([1,1,1]); -- { serverError 43 }
-select minMap(([1,1,1])); -- { serverError 43 }
+select avgMap([1,1,1], [2,2,2]); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
+select minMap((1,1)); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
+select minMap(([1,1,1],1)); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
+select minMap([1,1,1],1); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
+select minMap([1,1,1]); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
+select minMap(([1,1,1])); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
 
 DROP TABLE IF EXISTS sum_map_decimal;
 

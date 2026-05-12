@@ -14,6 +14,9 @@
 
 using namespace DB;
 
+namespace
+{
+
 std::map<TokenType, const char *> hilite =
 {
     {TokenType::Whitespace, "\033[0;44m"},
@@ -61,8 +64,9 @@ std::map<TokenType, const char *> hilite =
     {TokenType::ErrorMaxQuerySizeExceeded, "\033[0;41m"},
 };
 
+}
 
-int main(int, char **)
+int mainEntryExampleLexer(int, char **)
 {
     String query;
     ReadBufferFromFileDescriptor in(STDIN_FILENO);
@@ -114,6 +118,8 @@ int main(int, char **)
         writeChar('\n', out);
         ++token;
     }*/
+
+    out.finalize();
 
     return 0;
 }

@@ -1,4 +1,5 @@
 #pragma once
+#include <list>
 #include <memory>
 #include <atomic>
 #include <vector>
@@ -16,7 +17,7 @@ using PipelineExecutorPtr = std::shared_ptr<PipelineExecutor>;
 
 class IProcessor;
 using ProcessorPtr = std::shared_ptr<IProcessor>;
-using Processors = std::vector<ProcessorPtr>;
+using Processors = std::list<ProcessorPtr>;
 
 /// Pushing executor for Chain of processors. Always executed in single thread.
 /// Typical usage is:
@@ -47,7 +48,7 @@ public:
 
 private:
     QueryPipeline & pipeline;
-    std::atomic_bool need_data_flag = false;
+    std::atomic_bool input_wait_flag = false;
     std::shared_ptr<PushingSource> pushing_source;
 
     PipelineExecutorPtr executor;

@@ -1,18 +1,21 @@
 #pragma once
 
+#include <Core/Block_fwd.h>
 #include <Processors/IProcessor.h>
-#include <QueryPipeline/PipelineResourcesHolder.h>
-#include <QueryPipeline/Chain.h>
-#include <QueryPipeline/SizeLimits.h>
+
+#include <functional>
 
 namespace DB
 {
 
+class Chain;
 class EnabledQuota;
 struct StreamLocalLimits;
 
 class Pipe;
 using Pipes = std::vector<Pipe>;
+
+class ReadProgressCallback;
 
 using OutputPortRawPtrs = std::vector<OutputPort *>;
 
@@ -25,21 +28,22 @@ class Pipe
 public:
     /// Default constructor creates empty pipe. Generally, you cannot do anything with it except to check it is empty().
     /// You cannot get empty pipe in any other way. All transforms check that result pipe is not empty.
-    Pipe() = default;
+    Pipe();
     /// Create from source. Source must have no input ports and single output.
     explicit Pipe(ProcessorPtr source);
     /// Create from source with specified totals end extremes (may be nullptr). Ports should be owned by source.
     explicit Pipe(ProcessorPtr source, OutputPort * output, OutputPort * totals, OutputPort * extremes);
     /// Create from processors. Use all not-connected output ports as output_ports. Check invariants.
-    explicit Pipe(Processors processors_);
+    explicit Pipe(std::shared_ptr<Processors> processors_);
 
     Pipe(const Pipe & other) = delete;
     Pipe(Pipe && other) = default;
     Pipe & operator=(const Pipe & other) = delete;
     Pipe & operator=(Pipe && other) = default;
 
-    const Block & getHeader() const { return header; }
-    bool empty() const { return processors.empty(); }
+    const Block & getHeader() const { return *header; }
+    const SharedHeader & getSharedHeader() const { return header; }
+    bool empty() const { return processors->empty(); }
     size_t numOutputPorts() const { return output_ports.size(); }
     size_t maxParallelStreams() const { return max_parallel_streams; }
     OutputPort * getOutputPort(size_t pos) const { return output_ports[pos]; }
@@ -66,62 +70,50 @@ public:
     void addTransform(ProcessorPtr transform, OutputPort * totals, OutputPort * extremes);
     void addTransform(ProcessorPtr transform, InputPort * totals, InputPort * extremes);
 
-    enum class StreamType
+    void addTransform(
+        ProcessorPtr transform,
+        InputPort * totals_in, InputPort * extremes_in,
+        OutputPort * totals_out, OutputPort * extremes_out);
+
+    enum class StreamType : uint8_t
     {
         Main = 0, /// Stream for query data. There may be several streams of this type.
         Totals,  /// Stream for totals. No more than one.
         Extremes, /// Stream for extremes. No more than one.
     };
 
-    using ProcessorGetter = std::function<ProcessorPtr(const Block & header)>;
-    using ProcessorGetterWithStreamKind = std::function<ProcessorPtr(const Block & header, StreamType stream_type)>;
+    using ProcessorGetterSharedHeader = std::function<ProcessorPtr(const SharedHeader & header)>;
+    using ProcessorGetterSharedHeaderWithStreamKind = std::function<ProcessorPtr(const SharedHeader & header, StreamType stream_type)>;
 
     /// Add transform with single input and single output for each port.
-    void addSimpleTransform(const ProcessorGetter & getter);
-    void addSimpleTransform(const ProcessorGetterWithStreamKind & getter);
+    void addSimpleTransform(const ProcessorGetterSharedHeader & getter);
+    void addSimpleTransform(const ProcessorGetterSharedHeaderWithStreamKind & getter);
 
     /// Add chain to every output port.
     void addChains(std::vector<Chain> chains);
 
-    /// Changes the number of output ports if needed. Adds ResizeTransform.
-    void resize(size_t num_streams, bool force = false, bool strict = false);
+    /// Changes the number of output ports if needed. Adds (Strict)ResizeProcessor.
+    void resize(size_t num_streams, bool strict = false, UInt64 min_outstreams_per_resize_after_split = 0);
 
     using Transformer = std::function<Processors(OutputPortRawPtrs ports)>;
 
     /// Transform Pipe in general way.
-    void transform(const Transformer & transformer);
+    void transform(const Transformer & transformer, bool check_ports = true);
 
     /// Unite several pipes together. They should have same header.
     static Pipe unitePipes(Pipes pipes);
 
-    /// Get processors from Pipe. Use it with cautious, it is easy to loss totals and extremes ports.
-    static Processors detachProcessors(Pipe pipe) { return std::move(pipe.processors); }
-    /// Get processors from Pipe w/o destroying pipe (used for EXPLAIN to keep QueryPlan).
-    const Processors & getProcessors() const { return processors; }
+    /// Get processors from Pipe. Use it with caution, it is easy to lose totals and extremes ports.
+    static Processors detachProcessors(Pipe pipe) { return *std::move(pipe.processors); }
+    /// Get processors from Pipe without destroying pipe (used for EXPLAIN to keep QueryPlan).
+    const Processors & getProcessors() const { return *processors; }
 
-    /// Specify quotas and limits for every ISourceWithProgress.
-    void setLimits(const StreamLocalLimits & limits);
-    void setLeafLimits(const SizeLimits & leaf_limits);
-    void setQuota(const std::shared_ptr<const EnabledQuota> & quota);
-
-    /// Do not allow to change the table while the processors of pipe are alive.
-    void addTableLock(TableLockHolder lock) { holder.table_locks.emplace_back(std::move(lock)); }
-    /// This methods are from QueryPipeline. Needed to make conversion from pipeline to pipe possible.
-    void addInterpreterContext(std::shared_ptr<const Context> context) { holder.interpreter_context.emplace_back(std::move(context)); }
-    void addStorageHolder(StoragePtr storage) { holder.storage_holders.emplace_back(std::move(storage)); }
-    void addQueryIdHolder(std::shared_ptr<QueryIdHolder> query_id_holder) { holder.query_id_holder = std::move(query_id_holder); }
-    /// For queries with nested interpreters (i.e. StorageDistributed)
-    void addQueryPlan(std::unique_ptr<QueryPlan> plan);
-
-    PipelineResourcesHolder detachResources();
+    std::shared_ptr<Processors> getProcessorsPtr() { return processors; }
 
 private:
-    /// Destruction order: processors, header, locks, temporary storages, local contexts
-    PipelineResourcesHolder holder;
-
     /// Header is common for all output below.
-    Block header;
-    Processors processors;
+    SharedHeader header;
+    std::shared_ptr<Processors> processors;
 
     /// Output ports. Totals and extremes are allowed to be empty.
     OutputPortRawPtrs output_ports;
@@ -140,8 +132,8 @@ private:
     /// So, we may be sure that Pipe always has output port if not empty.
     bool isCompleted() const { return !empty() && output_ports.empty(); }
     static Pipe unitePipes(Pipes pipes, Processors * collected_processors, bool allow_empty_header);
-    void setSinks(const Pipe::ProcessorGetterWithStreamKind & getter);
-    void setOutputFormat(ProcessorPtr output);
+    void setSinks(const Pipe::ProcessorGetterSharedHeaderWithStreamKind & getter);
+    void addSplitResizeTransform(size_t num_streams, size_t min_outstreams_per_resize_after_split, bool strict);
 
     friend class QueryPipelineBuilder;
     friend class QueryPipeline;

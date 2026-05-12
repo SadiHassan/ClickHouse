@@ -1,4 +1,4 @@
-#include "config_functions.h"
+#include "config.h"
 
 #if USE_S2_GEOMETRY
 
@@ -10,7 +10,7 @@
 #include <Common/typeid_cast.h>
 #include <base/range.h>
 
-#include "s2_fwd.h"
+#include <Functions/s2_fwd.h>
 
 class S2CellId;
 
@@ -21,6 +21,7 @@ namespace ErrorCodes
 {
     extern const int ILLEGAL_TYPE_OF_ARGUMENT;
     extern const int BAD_ARGUMENTS;
+    extern const int ILLEGAL_COLUMN;
 }
 
 namespace
@@ -57,7 +58,7 @@ public:
         if (!WhichDataType(arg).isUInt64())
             throw Exception(
                 ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
-                "Illegal type {} of argument {} of function {}. Must be Float64",
+                "Illegal type {} of argument {} of function {}. Must be UInt64",
                 arg->getName(), 1, getName());
 
         DataTypePtr element = std::make_shared<DataTypeFloat64>();
@@ -67,7 +68,20 @@ public:
 
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr &, size_t input_rows_count) const override
     {
-        const auto * col_id = arguments[0].column.get();
+        auto non_const_arguments = arguments;
+        for (auto & argument : non_const_arguments)
+            argument.column = argument.column->convertToFullColumnIfConst();
+
+        const auto * col_id = checkAndGetColumn<ColumnUInt64>(non_const_arguments[0].column.get());
+        if (!col_id)
+            throw Exception(
+                ErrorCodes::ILLEGAL_COLUMN,
+                "Illegal type {} of argument {} of function {}. Must be UInt64",
+                arguments[0].type->getName(),
+                1,
+                getName());
+
+        const auto & data_id = col_id->getData();
 
         auto col_longitude = ColumnFloat64::create();
         auto col_latitude = ColumnFloat64::create();
@@ -78,12 +92,12 @@ public:
         auto & latitude = col_latitude->getData();
         latitude.reserve(input_rows_count);
 
-        for (const auto row : collections::range(0, input_rows_count))
+        for (size_t row = 0; row < input_rows_count; ++row)
         {
-            const auto id = S2CellId(col_id->getUInt(row));
+            const auto id = S2CellId(data_id[row]);
 
             if (!id.is_valid())
-                throw Exception(ErrorCodes::BAD_ARGUMENTS, "Point is not valid");
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "CellId is invalid.");
 
             S2Point point = id.ToPoint();
             S2LatLng ll(point);
@@ -99,9 +113,22 @@ public:
 
 }
 
-void registerFunctionS2ToGeo(FunctionFactory & factory)
+REGISTER_FUNCTION(S2ToGeo)
 {
-    factory.registerFunction<FunctionS2ToGeo>();
+    FunctionDocumentation::Description description = R"(
+Returns coordinates (longitude, latitude) corresponding to the provided S2 point index. This is the inverse of [`geoToS2`](/sql-reference/functions/geo/s2#geotos2).
+    )";
+    FunctionDocumentation::Syntax syntax = "s2ToGeo(s2index)";
+    FunctionDocumentation::Arguments arguments = {
+        {"s2index", "The S2 cell identifier.", {"UInt64"}}
+    };
+    FunctionDocumentation::ReturnedValue returned_value = {"Returns a tuple (lon, lat) of Float64 values representing the longitude and latitude.", {"Tuple(Float64, Float64)"}};
+    FunctionDocumentation::Examples examples = {{"Basic usage", "SELECT s2ToGeo(4704772434919038107)", "(37.79506681471008,55.7129059052841)"}};
+    FunctionDocumentation::IntroducedIn introduced_in = {21, 9};
+    FunctionDocumentation::Category category = FunctionDocumentation::Category::Geo;
+    FunctionDocumentation documentation = {description, syntax, arguments, {}, returned_value, examples, introduced_in, category};
+
+    factory.registerFunction<FunctionS2ToGeo>(documentation);
 }
 
 

@@ -7,6 +7,7 @@
 #include <amqpcpp/linux_tcp.h>
 #include <base/types.h>
 #include <amqpcpp/libuv.h>
+#include <Poco/Logger.h>
 
 namespace DB
 {
@@ -23,7 +24,7 @@ class RabbitMQHandler : public AMQP::LibUvHandler
 {
 
 public:
-    RabbitMQHandler(uv_loop_t * loop_, Poco::Logger * log_);
+    RabbitMQHandler(uv_loop_t * loop_, LoggerPtr log_);
 
     void onError(AMQP::TcpConnection * connection, const char * message) override;
     void onReady(AMQP::TcpConnection * connection) override;
@@ -33,13 +34,14 @@ public:
 
     /// Loop to wait for small tasks in a non-blocking mode.
     /// Adds synchronization with main background loop.
-    void iterateLoop();
+    int iterateLoop();
 
     /// Loop to wait for small tasks in a blocking mode.
     /// No synchronization is done with the main loop thread.
-    void startBlockingLoop();
+    int startBlockingLoop();
 
     void stopLoop();
+    void stopBlockingLoop();
 
     bool connectionRunning() const { return connection_running.load(); }
     bool loopRunning() const { return loop_running.load(); }
@@ -49,7 +51,7 @@ public:
 
 private:
     uv_loop_t * loop;
-    Poco::Logger * log;
+    LoggerPtr log;
 
     std::atomic<bool> connection_running, loop_running;
     std::atomic<UInt8> loop_state;

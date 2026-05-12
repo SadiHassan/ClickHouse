@@ -1,35 +1,32 @@
 ---
-toc_priority: 43
-toc_title: Files
+description: 'Documentation for Files'
+sidebar_label: 'Files'
+slug: /sql-reference/functions/files
+title: 'Files'
+doc_type: 'reference'
 ---
-
-# Functions for Working with Files {#functions-for-working-with-files}
 
 ## file {#file}
 
-Reads file as a String. The file content is not parsed, so any information is read as one string and placed into the specified column.
+Reads a file as string and loads the data into the specified column. The file content is not interpreted.
+
+Also see table function [file](../table-functions/file.md).
 
 **Syntax**
 
-``` sql
-file(path)
+```sql
+file(path[, default])
 ```
 
 **Arguments**
 
--   `path` — The relative path to the file from [user_files_path](../../operations/server-configuration-parameters/settings.md#server_configuration_parameters-user_files_path). Path to file support following wildcards: `*`, `?`, `{abc,def}` and `{N..M}` where `N`, `M` — numbers, `'abc', 'def'` — strings.
+- `path` — The path of the file relative to [user_files_path](../../operations/server-configuration-parameters/settings.md#user_files_path). Supports wildcards `*`, `**`, `?`, `{abc,def}` and `{N..M}` where `N`, `M` are numbers and `'abc', 'def'` are strings.
+- `default` — The value returned if the file does not exist or cannot be accessed. Supported data types: [String](../data-types/string.md) and [NULL](/operations/settings/formats#input_format_null_as_default).
 
 **Example**
 
 Inserting data from files a.txt and b.txt into a table as strings:
 
-Query:
-
-``` sql
+```sql
 INSERT INTO table SELECT file('a.txt'), file('b.txt');
 ```
-
-**See Also**
-
--   [user_files_path](../../operations/server-configuration-parameters/settings.md#server_configuration_parameters-user_files_path)
--   [file](../table-functions/file.md)

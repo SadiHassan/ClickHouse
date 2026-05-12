@@ -3,14 +3,12 @@
   * (by terminating the program immediately).
   */
 
-/// It is only enabled in debug build (its intended use is for CI checks).
-#if !defined(NDEBUG)
+#include <base/sanitizer_defs.h>
 
-#if defined(__clang__)
-    #pragma clang diagnostic ignored "-Wincompatible-library-redeclaration"
-#else
-    #pragma GCC diagnostic ignored "-Wbuiltin-declaration-mismatch"
-#endif
+/// We check for "harmful" functions if it's a debug build or with a sanitizer.
+#if defined(DEBUG_OR_SANITIZER_BUILD)
+
+#pragma clang diagnostic ignored "-Wincompatible-library-redeclaration"
 
 /// We cannot use libc headers here.
 long write(int, const void *, unsigned long);
@@ -31,7 +29,8 @@ TRAP(argp_state_help)
 TRAP(argp_usage)
 TRAP(asctime)
 TRAP(clearenv)
-TRAP(crypt)
+// Redefined at contrib/libbcrypt/crypt_blowfish/wrapper.c:186
+// TRAP(crypt)
 TRAP(ctime)
 TRAP(cuserid)
 TRAP(drand48)
@@ -68,14 +67,11 @@ TRAP(gethostbyaddr)
 TRAP(gethostbyname)
 TRAP(gethostbyname2)
 TRAP(gethostent)
-TRAP(getlogin)
-TRAP(getmntent)
 TRAP(getnetbyaddr)
 TRAP(getnetbyname)
 TRAP(getnetent)
 TRAP(getnetgrent)
 TRAP(getnetgrent_r)
-TRAP(getopt)
 TRAP(getopt_long)
 TRAP(getopt_long_only)
 TRAP(getpass)
@@ -136,7 +132,6 @@ TRAP(nrand48)
 TRAP(__ppc_get_timebase_freq)
 TRAP(ptsname)
 TRAP(putchar_unlocked)
-TRAP(putenv)
 TRAP(pututline)
 TRAP(pututxline)
 TRAP(putwchar_unlocked)
@@ -151,7 +146,6 @@ TRAP(sethostent)
 TRAP(sethostid)
 TRAP(setkey)
 //TRAP(setlocale) // Used by replxx at startup
-TRAP(setlogmask)
 TRAP(setnetent)
 TRAP(setnetgrent)
 TRAP(setprotoent)
@@ -163,7 +157,9 @@ TRAP(siginterrupt)
 TRAP(sigpause)
 //TRAP(sigprocmask)
 TRAP(sigsuspend)
-TRAP(sleep)
+#if !USE_FUZZING_MODE
+TRAP(sleep) // Used by libFuzzer
+#endif
 TRAP(srand48)
 //TRAP(strerror) // Used by RocksDB and many other libraries, unfortunately.
 //TRAP(strsignal) // This function is imported from Musl and is thread safe.
@@ -182,7 +178,6 @@ TRAP(vlimit)
 TRAP(wcsnrtombs)
 TRAP(wcsrtombs)
 TRAP(wctomb)
-TRAP(wordexp)
 TRAP(basename)
 TRAP(catgets)
 TRAP(dbm_clearerr)
@@ -195,9 +190,8 @@ TRAP(dbm_nextkey)
 TRAP(dbm_open)
 TRAP(dbm_store)
 TRAP(dirname)
-#if !defined(SANITIZER)
-TRAP(dlerror) // Used by tsan
-#endif
+// TRAP(dlerror) // It is not thread-safe. But it is used by dynamic linker to load some name resolution plugins. Also used by TSan.
+/// Note: we should better get rid of glibc, dynamic linking and all that sort of annoying garbage altogether.
 TRAP(ftw)
 TRAP(getc_unlocked)
 //TRAP(getenv) // Ok at program startup
@@ -208,7 +202,6 @@ TRAP(lgammal)
 TRAP(nftw)
 TRAP(nl_langinfo)
 TRAP(putc_unlocked)
-TRAP(rand)
 /** In  the current POSIX.1 specification (POSIX.1-2008), readdir() is not required to be thread-safe.  However, in modern
   * implementations (including the glibc implementation), concurrent calls to readdir() that specify different directory streams
   * are thread-safe.  In cases where multiple threads must read from the same directory stream, using readdir() with external
@@ -244,5 +237,64 @@ TRAP(lgammaf32)
 TRAP(lgammaf32x)
 TRAP(lgammaf64)
 TRAP(lgammaf64x)
+
+/// These functions are unused by ClickHouse and we should be aware if they are accidentally get used.
+/// Sometimes people report that these function contain vulnerabilities (these reports are bogus for ClickHouse).
+TRAP(mq_close)
+TRAP(mq_getattr)
+TRAP(mq_setattr)
+TRAP(mq_notify)
+TRAP(mq_open)
+TRAP(mq_receive)
+TRAP(mq_send)
+TRAP(mq_unlink)
+TRAP(mq_timedsend)
+TRAP(mq_timedreceive)
+
+/// These functions are also unused by ClickHouse.
+TRAP(wordexp)
+TRAP(wordfree)
+
+/// C11 threading primitives are not supported by ThreadSanitizer.
+/// Also we should avoid using them for compatibility with old libc.
+TRAP(thrd_create)
+TRAP(thrd_equal)
+TRAP(thrd_current)
+TRAP(thrd_sleep)
+TRAP(thrd_yield)
+TRAP(thrd_exit)
+TRAP(thrd_detach)
+TRAP(thrd_join)
+
+TRAP(mtx_init)
+TRAP(mtx_lock)
+TRAP(mtx_timedlock)
+TRAP(mtx_trylock)
+TRAP(mtx_unlock)
+TRAP(mtx_destroy)
+TRAP(call_once)
+
+TRAP(cnd_init)
+TRAP(cnd_signal)
+TRAP(cnd_broadcast)
+TRAP(cnd_wait)
+TRAP(cnd_timedwait)
+TRAP(cnd_destroy)
+
+TRAP(tss_create)
+TRAP(tss_get)
+TRAP(tss_set)
+TRAP(tss_delete)
+
+#ifndef USE_MUSL
+/// These produce duplicate symbol errors when statically linking with musl.
+/// Maybe we can remove them from the musl fork.
+TRAP(getopt)
+TRAP(putenv)
+TRAP(setlogmask)
+TRAP(rand)
+TRAP(getmntent)
+TRAP(getlogin)
+#endif
 
 #endif

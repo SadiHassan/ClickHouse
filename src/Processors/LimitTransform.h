@@ -1,11 +1,18 @@
 #pragma once
 
-#include <Processors/IProcessor.h>
-#include <Processors/RowsBeforeLimitCounter.h>
+#include <unordered_map>
+
+#include <Core/Block_fwd.h>
 #include <Core/SortDescription.h>
+#include <Processors/Chunk.h>
+#include <Processors/IProcessor.h>
+#include <Processors/RowsBeforeStepCounter.h>
 
 namespace DB
 {
+
+class RuntimeDataflowStatisticsCacheUpdater;
+using RuntimeDataflowStatisticsCacheUpdaterPtr = std::shared_ptr<RuntimeDataflowStatisticsCacheUpdater>;
 
 /// Implementation for LIMIT N OFFSET M
 /// This processor support multiple inputs and outputs (the same number).
@@ -15,7 +22,7 @@ namespace DB
 ///
 /// always_read_till_end - read all data from input ports even if limit was reached.
 /// with_ties, description - implementation of LIMIT WITH TIES. It works only for single port.
-class LimitTransform : public IProcessor
+class LimitTransform final : public IProcessor
 {
 private:
     UInt64 limit;
@@ -30,7 +37,7 @@ private:
     std::vector<size_t> sort_column_positions;
 
     UInt64 rows_read = 0; /// including the last read block
-    RowsBeforeLimitCounterPtr rows_before_limit_at_least;
+    RowsBeforeStepCounterPtr rows_before_limit_at_least;
 
     /// State of port's pair.
     /// Chunks from different port pairs are not mixed for better cache locality.
@@ -41,10 +48,19 @@ private:
         InputPort * input_port = nullptr;
         OutputPort * output_port = nullptr;
         bool is_finished = false;
+
+        /// This flag is used to avoid counting rows multiple times before applying a limit
+        /// condition, which can happen through certain input ports like PartialSortingTransform and
+        /// RemoteSource.
+        bool input_port_has_counter = false;
     };
 
     std::vector<PortsData> ports_data;
+    std::unordered_map<const InputPort *, size_t> input_port_to_data;
+    std::unordered_map<const OutputPort *, size_t> output_port_to_data;
     size_t num_finished_port_pairs = 0;
+
+    RuntimeDataflowStatisticsCacheUpdaterPtr updater;
 
     Chunk makeChunkWithPreviousRow(const Chunk & current_chunk, UInt64 row_num) const;
     ColumnRawPtrs extractSortColumns(const Columns & columns) const;
@@ -52,13 +68,18 @@ private:
 
 public:
     LimitTransform(
-        const Block & header_, UInt64 limit_, UInt64 offset_, size_t num_streams = 1,
-        bool always_read_till_end_ = false, bool with_ties_ = false,
-        SortDescription description_ = {});
+        SharedHeader header_,
+        UInt64 limit_,
+        UInt64 offset_,
+        size_t num_streams = 1,
+        bool always_read_till_end_ = false,
+        bool with_ties_ = false,
+        SortDescription description_ = {},
+        RuntimeDataflowStatisticsCacheUpdaterPtr updater_ = nullptr);
 
     String getName() const override { return "Limit"; }
 
-    Status prepare(const PortNumbers & /*updated_input_ports*/, const PortNumbers & /*updated_output_ports*/) override;
+    Status prepare(const UpdatedInputPorts & /*updated_input_ports*/, const UpdatedOutputPorts & /*updated_output_ports*/) override;
     Status prepare() override; /// Compatibility for TreeExecutor.
     Status preparePair(PortsData & data);
     void splitChunk(PortsData & data);
@@ -66,7 +87,8 @@ public:
     InputPort & getInputPort() { return inputs.front(); }
     OutputPort & getOutputPort() { return outputs.front(); }
 
-    void setRowsBeforeLimitCounter(RowsBeforeLimitCounterPtr counter) { rows_before_limit_at_least.swap(counter); }
+    void setRowsBeforeLimitCounter(RowsBeforeStepCounterPtr counter) override { rows_before_limit_at_least.swap(counter); }
+    void setInputPortHasCounter(size_t pos) { ports_data[pos].input_port_has_counter = true; }
 };
 
 }

@@ -1,22 +1,29 @@
-#if defined(OS_LINUX)
+#if defined(OS_LINUX) || defined(OS_FREEBSD)
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#if defined(OS_FREEBSD)
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#endif
 #include <fcntl.h>
 #include <unistd.h>
 #include <cassert>
 
-#include "MemoryStatisticsOS.h"
+#include <Common/MemoryStatisticsOS.h>
 
-#include <base/logger_useful.h>
+#include <Common/logger_useful.h>
 #include <base/getPageSize.h>
 #include <Common/Exception.h>
+#include <Common/ErrnoException.h>
 #include <IO/ReadBufferFromMemory.h>
 #include <IO/ReadHelpers.h>
 
 
 namespace DB
 {
+
+#if defined(OS_LINUX)
 
 namespace ErrorCodes
 {
@@ -33,7 +40,8 @@ MemoryStatisticsOS::MemoryStatisticsOS()
     fd = ::open(filename, O_RDONLY | O_CLOEXEC);
 
     if (-1 == fd)
-        throwFromErrno("Cannot open file " + std::string(filename), errno == ENOENT ? ErrorCodes::FILE_DOESNT_EXIST : ErrorCodes::CANNOT_OPEN_FILE);
+        ErrnoException::throwFromPath(
+            errno == ENOENT ? ErrorCodes::FILE_DOESNT_EXIST : ErrorCodes::CANNOT_OPEN_FILE, filename, "Cannot open file {}", filename);
 }
 
 MemoryStatisticsOS::~MemoryStatisticsOS()
@@ -42,9 +50,8 @@ MemoryStatisticsOS::~MemoryStatisticsOS()
     {
         try
         {
-            throwFromErrno(
-                    "File descriptor for \"" + std::string(filename) + "\" could not be closed. "
-                    "Something seems to have gone wrong. Inspect errno.", ErrorCodes::CANNOT_CLOSE_FILE);
+            ErrnoException::throwFromPath(
+                ErrorCodes::CANNOT_CLOSE_FILE, filename, "File descriptor for '{}' could not be closed", filename);
         }
         catch (const ErrnoException &)
         {
@@ -71,7 +78,7 @@ MemoryStatisticsOS::Data MemoryStatisticsOS::get() const
             if (errno == EINTR)
                 continue;
 
-            throwFromErrno("Cannot read from file " + std::string(filename), ErrorCodes::CANNOT_READ_FROM_FILE_DESCRIPTOR);
+            ErrnoException::throwFromPath(ErrorCodes::CANNOT_READ_FROM_FILE_DESCRIPTOR, filename, "Cannot read from file {}", filename);
         }
 
         assert(res >= 0);
@@ -102,6 +109,53 @@ MemoryStatisticsOS::Data MemoryStatisticsOS::get() const
 
     return data;
 }
+
+#endif
+
+#if defined(OS_FREEBSD)
+
+namespace ErrorCodes
+{
+    extern const int SYSTEM_ERROR;
+}
+
+MemoryStatisticsOS::MemoryStatisticsOS()
+{
+    pagesize = static_cast<size_t>(::getPageSize());
+    self = ::getpid();
+}
+
+MemoryStatisticsOS::~MemoryStatisticsOS()
+{
+}
+
+MemoryStatisticsOS::Data MemoryStatisticsOS::get() const
+{
+    Data data;
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, self };
+    struct kinfo_proc kp;
+    size_t len = sizeof(struct kinfo_proc);
+
+    if (-1 == ::sysctl(mib, 4, &kp, &len, nullptr, 0))
+        throw ErrnoException(ErrorCodes::SYSTEM_ERROR, "Cannot sysctl(kern.proc.pid.{})", std::to_string(self));
+
+    if (sizeof(struct kinfo_proc) != len)
+        throw DB::Exception(DB::ErrorCodes::SYSTEM_ERROR, "Kernel returns structure of {} bytes instead of expected {}",
+            len, sizeof(struct kinfo_proc));
+
+    if (sizeof(struct kinfo_proc) != kp.ki_structsize)
+        throw DB::Exception(DB::ErrorCodes::SYSTEM_ERROR, "Kernel structure size ({}) does not match expected ({}).",
+            kp.ki_structsize, sizeof(struct kinfo_proc));
+
+    data.virt = kp.ki_size;
+    data.resident = kp.ki_rssize * pagesize;
+    data.code = kp.ki_tsize * pagesize;
+    data.data_and_stack = (kp.ki_dsize + kp.ki_ssize) * pagesize;
+
+    return data;
+}
+
+#endif
 
 }
 

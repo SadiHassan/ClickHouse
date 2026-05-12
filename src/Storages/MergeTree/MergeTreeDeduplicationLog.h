@@ -1,8 +1,8 @@
 #pragma once
+#include <base/StringViewHash.h>
 #include <Core/Types.h>
-#include <base/StringRef.h>
-#include <IO/WriteBufferFromFile.h>
 #include <Storages/MergeTree/MergeTreePartInfo.h>
+#include <Disks/IDisk.h>
 #include <map>
 #include <list>
 #include <mutex>
@@ -35,7 +35,7 @@ private:
         V value;
     };
     using Queue = std::list<ListNode>;
-    using IndexMap = std::unordered_map<StringRef, typename Queue::iterator, StringRefHash>;
+    using IndexMap = std::unordered_map<std::string_view, typename Queue::iterator, StringViewHash>;
 
     Queue queue;
     IndexMap map;
@@ -137,12 +137,18 @@ public:
     MergeTreeDeduplicationLog(
         const std::string & logs_dir_,
         size_t deduplication_window_,
-        const MergeTreeDataFormatVersion & format_version_);
+        const MergeTreeDataFormatVersion & format_version_,
+        DiskPtr disk_);
 
+    struct AddPartResult
+    {
+        MergeTreePartInfo part_info;
+        std::string block_id;
+    };
     /// Add part into in-memory hash table and to disk
-    /// Return true and part info if insertion was successful.
-    /// Otherwise, in case of duplicate, return false and previous part name with same hash (useful for logging)
-    std::pair<MergeTreePartInfo, bool> addPart(const std::string & block_id, const MergeTreePartInfo & part);
+    /// Return empty block_id and part info if insertion was successful.
+    /// Otherwise, in case of duplicate, return block_id with the collision and previous part name with same hash (useful for logging)
+    std::vector<AddPartResult> addPart(const std::vector<std::string> & block_id, const MergeTreePartInfo & part);
 
     /// Remove all covered parts from in memory table and add DROP records to the disk
     void dropPart(const MergeTreePartInfo & drop_part_info);
@@ -151,6 +157,10 @@ public:
     void load();
 
     void setDeduplicationWindowSize(size_t deduplication_window_);
+
+    void shutdown();
+
+    ~MergeTreeDeduplicationLog();
 private:
     const std::string logs_dir;
     /// Size of deduplication window
@@ -171,10 +181,16 @@ private:
     LimitedOrderedHashMap<MergeTreePartInfo> deduplication_map;
 
     /// Writer to the current log file
-    std::unique_ptr<WriteBufferFromFile> current_writer;
+    std::unique_ptr<WriteBufferFromFileBase> current_writer;
 
-    /// Overall mutex because we can have a lot of cocurrent inserts
+    /// Overall mutex because we can have a lot of concurrent inserts
     std::mutex state_mutex;
+
+    /// Disk where log is stored
+    DiskPtr disk;
+    const bool disk_supports_writing_with_append;
+
+    bool stopped{false};
 
     /// Start new log
     void rotate();

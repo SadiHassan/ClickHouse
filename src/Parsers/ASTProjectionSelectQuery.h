@@ -26,10 +26,10 @@ public:
 
     ASTPtr & refSelect() { return getExpression(Expression::SELECT); }
 
-    const ASTPtr with() const { return getExpression(Expression::WITH); }
-    const ASTPtr select() const { return getExpression(Expression::SELECT); }
-    const ASTPtr groupBy() const { return getExpression(Expression::GROUP_BY); }
-    const ASTPtr orderBy() const { return getExpression(Expression::ORDER_BY); }
+    ASTPtr with() const { return getExpression(Expression::WITH); }
+    ASTPtr select() const { return getExpression(Expression::SELECT); }
+    ASTPtr groupBy() const { return getExpression(Expression::GROUP_BY); }
+    ASTPtr orderBy() const { return getExpression(Expression::ORDER_BY); }
 
     /// Set/Reset/Remove expression.
     void setExpression(Expression expr, ASTPtr && ast);
@@ -45,7 +45,7 @@ public:
     ASTPtr cloneToASTSelect() const;
 
 protected:
-    void formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const override;
+    void formatImpl(WriteBuffer & ostr, const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const override;
 
 private:
     std::unordered_map<Expression, size_t> positions;

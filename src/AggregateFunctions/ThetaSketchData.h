@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Common/config.h>
+#include "config.h"
 
 #if USE_DATASKETCHES
 
@@ -8,6 +8,8 @@
 #include <memory>
 #include <theta_sketch.hpp>
 #include <theta_union.hpp>
+#include <theta_intersection.hpp>
+#include <theta_a_not_b.hpp>
 
 
 namespace DB
@@ -18,17 +20,19 @@ template <typename Key>
 class ThetaSketchData : private boost::noncopyable
 {
 private:
+    /// Used for insertions
     std::unique_ptr<datasketches::update_theta_sketch> sk_update;
+    /// Used for merging
     std::unique_ptr<datasketches::theta_union> sk_union;
 
-    inline datasketches::update_theta_sketch * getSkUpdate()
+    datasketches::update_theta_sketch * getSkUpdate()
     {
         if (!sk_update)
             sk_update = std::make_unique<datasketches::update_theta_sketch>(datasketches::update_theta_sketch::builder().build());
         return sk_update.get();
     }
 
-    inline datasketches::theta_union * getSkUnion()
+    datasketches::theta_union * getSkUnion()
     {
         if (!sk_union)
             sk_union = std::make_unique<datasketches::theta_union>(datasketches::theta_union::builder().build());
@@ -42,25 +46,38 @@ public:
     ~ThetaSketchData() = default;
 
     /// Insert original value without hash, as `datasketches::update_theta_sketch.update` will do the hash internal.
-    void insertOriginal(const StringRef & value)
+    void insertOriginal(std::string_view value)
     {
-        getSkUpdate()->update(value.data, value.size);
+        getSkUpdate()->update(value.data(), value.size());
+        /// In case of optimization for u8 keys (see addBatchLookupTable()) it is possible to have few calls of insert() after merge(),
+        /// and we should update sk_union as well, note, that there should not be too many, so performance wise it should be OK
+        if (sk_union)
+        {
+            sk_union->update(*sk_update);
+            sk_update.reset(nullptr);
+        }
     }
 
     /// Note that `datasketches::update_theta_sketch.update` will do the hash again.
     void insert(Key value)
     {
         getSkUpdate()->update(value);
+        /// In case of optimization for u8 keys (see addBatchLookupTable()) it is possible to have few calls of insert() after merge(),
+        /// and we should update sk_union as well, note, that there should not be too many, so performance wise it should be OK
+        if (sk_union)
+        {
+            sk_union->update(*sk_update);
+            sk_update.reset(nullptr);
+        }
     }
 
     UInt64 size() const
     {
         if (sk_union)
             return static_cast<UInt64>(sk_union->get_result().get_estimate());
-        else if (sk_update)
+        if (sk_update)
             return static_cast<UInt64>(sk_update->get_estimate());
-        else
-            return 0;
+        return 0;
     }
 
     void merge(const ThetaSketchData & rhs)
@@ -77,6 +94,73 @@ public:
             u->update(*rhs.sk_update);
         else if (rhs.sk_union)
             u->update(rhs.sk_union->get_result());
+    }
+
+    void intersect(const ThetaSketchData & rhs)
+    {
+        /// If `rhs` has no recorded values it represents an empty set, and the
+        /// intersection with an empty set is always empty. Without this guard
+        /// `theta_intersection` would only receive `this` as a single input and
+        /// `get_result` would return that input unchanged — yielding a wrong,
+        /// non-empty result. This matters for example after
+        /// `uniqThetaMergeStateIf(state, predicate)` when the predicate excludes
+        /// every row: the resulting state is freshly created and has neither
+        /// `sk_update` nor `sk_union` allocated.
+        if (!rhs.sk_update && !rhs.sk_union)
+        {
+            sk_update.reset(nullptr);
+            sk_union.reset(nullptr);
+            return;
+        }
+
+        datasketches::theta_union * u = getSkUnion();
+
+        if (sk_update)
+        {
+            u->update(*sk_update);
+            sk_update.reset(nullptr);
+        }
+
+        datasketches::theta_intersection theta_intersection;
+
+        theta_intersection.update(u->get_result());
+
+        if (rhs.sk_update)
+            theta_intersection.update(*rhs.sk_update);
+        else if (rhs.sk_union)
+            theta_intersection.update(rhs.sk_union->get_result());
+
+        sk_union.reset(nullptr);
+        u = getSkUnion();
+        u->update(theta_intersection.get_result());
+    }
+
+    void aNotB(const ThetaSketchData & rhs)
+    {
+        datasketches::theta_union * u = getSkUnion();
+
+        if (sk_update)
+        {
+            u->update(*sk_update);
+            sk_update.reset(nullptr);
+        }
+
+        datasketches::theta_a_not_b a_not_b;
+
+        if (rhs.sk_update)
+        {
+            datasketches::compact_theta_sketch result = a_not_b.compute(u->get_result(), *rhs.sk_update);
+            sk_union.reset(nullptr);
+            u = getSkUnion();
+            u->update(result);
+        }
+        else if (rhs.sk_union)
+        {
+            datasketches::compact_theta_sketch result = a_not_b.compute(u->get_result(), rhs.sk_union->get_result());
+            sk_union.reset(nullptr);
+            u = getSkUnion();
+            u->update(result);
+        }
     }
 
     /// You can only call for an empty object.

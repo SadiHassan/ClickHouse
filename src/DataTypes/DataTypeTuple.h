@@ -1,6 +1,7 @@
 #pragma once
 
 #include <DataTypes/IDataType.h>
+#include <optional>
 
 
 namespace DB
@@ -21,23 +22,25 @@ class DataTypeTuple final : public IDataType
 private:
     DataTypes elems;
     Strings names;
-    bool have_explicit_names;
-    bool serialize_names = true;
+    bool has_explicit_names;
+
 public:
     static constexpr bool is_parametric = true;
 
-    DataTypeTuple(const DataTypes & elems);
-    DataTypeTuple(const DataTypes & elems, const Strings & names, bool serialize_names_ = true);
-
-    static bool canBeCreatedWithNames(const Strings & names);
+    explicit DataTypeTuple(const DataTypes & elems);
+    DataTypeTuple(const DataTypes & elems, const Strings & names);
 
     TypeIndex getTypeId() const override { return TypeIndex::Tuple; }
     std::string doGetName() const override;
+    std::string doGetPrettyName(size_t indent) const override;
     const char * getFamilyName() const override { return "Tuple"; }
 
-    bool canBeInsideNullable() const override { return false; }
+    bool canBeInsideNullable() const override { return true; }
+    bool supportsSparseSerialization() const override { return true; }
+    bool canBeInsideSparseColumns() const override { return false; }
 
     MutableColumnPtr createColumn() const override;
+    MutableColumnPtr createColumn(const ISerialization & serialization) const override;
 
     Field getDefault() const override;
     void insertDefaultInto(IColumn & column) const override;
@@ -48,24 +51,33 @@ public:
     bool haveSubtypes() const override { return !elems.empty(); }
     bool isComparable() const override;
     bool textCanContainOnlyValidUTF8() const override;
+    bool hasDynamicStructure() const override;
     bool haveMaximumSizeOfValue() const override;
     size_t getMaximumSizeOfValueInMemory() const override;
     size_t getSizeOfValueInMemory() const override;
 
-    SerializationPtr getSerialization(const String & column_name, const StreamExistenceCallback & callback) const override;
+    SerializationPtr doGetSerialization(const SerializationInfoSettings & settings) const override;
+    SerializationPtr getSerialization(const SerializationInfo & info) const override;
+    MutableSerializationInfoPtr createSerializationInfo(const SerializationInfoSettings & settings) const override;
+    SerializationInfoPtr getSerializationInfo(const IColumn & column) const override;
 
-    SerializationPtr doGetDefaultSerialization() const override;
-
+    DataTypePtr getNormalizedType() const override;
     const DataTypePtr & getElement(size_t i) const { return elems[i]; }
     const DataTypes & getElements() const { return elems; }
     const Strings & getElementNames() const { return names; }
 
-    size_t getPositionByName(const String & name) const;
+    size_t getPositionByName(std::string_view name, bool case_insensitive = false) const;
+    std::optional<size_t> tryGetPositionByName(std::string_view name, bool case_insensitive = false) const;
     String getNameByPosition(size_t i) const;
 
-    bool haveExplicitNames() const { return have_explicit_names; }
-    bool serializeNames() const { return serialize_names; }
+    bool hasExplicitNames() const { return has_explicit_names; }
+
+    void updateHashImpl(SipHash & hash) const override;
+
+    void forEachChild(const ChildCallback & callback) const override;
+
+private:
+    SerializationInfoMutablePtr getSerializationInfoImpl(const IColumn & column) const;
 };
 
 }
-

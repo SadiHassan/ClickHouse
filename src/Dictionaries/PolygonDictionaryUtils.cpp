@@ -1,12 +1,12 @@
-#include "PolygonDictionaryUtils.h"
+#include <Dictionaries/PolygonDictionaryUtils.h>
 
+#include <Common/SetWithMemoryTracking.h>
 #include <Common/ThreadPool.h>
-
-#include <base/logger_useful.h>
+#include <Common/logger_useful.h>
 
 #include <algorithm>
-#include <thread>
 #include <numeric>
+
 
 namespace DB
 {
@@ -16,7 +16,7 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
-FinalCell::FinalCell(const std::vector<size_t> & polygon_ids_, const std::vector<Polygon> &, const Box &, bool is_last_covered_):
+FinalCell::FinalCell(const VectorWithMemoryTracking<size_t> & polygon_ids_, const VectorWithMemoryTracking<Polygon> &, const Box &, bool is_last_covered_):
 polygon_ids(polygon_ids_)
 {
     if (is_last_covered_)
@@ -37,19 +37,19 @@ inline void shift(Point & point, Coord val)
     point.y(point.y() + val);
 }
 
-FinalCellWithSlabs::FinalCellWithSlabs(const std::vector<size_t> & polygon_ids_, const std::vector<Polygon> & polygons_, const Box & box_, bool is_last_covered_)
+FinalCellWithSlabs::FinalCellWithSlabs(const VectorWithMemoryTracking<size_t> & polygon_ids_, const VectorWithMemoryTracking<Polygon> & polygons_, const Box & box_, bool is_last_covered_)
 {
     auto extended = box_;
     shift(extended.min_corner(), -GridRoot<FinalCellWithSlabs>::kEps);
     shift(extended.max_corner(), GridRoot<FinalCellWithSlabs>::kEps);
     Polygon tmp_poly;
     bg::convert(extended, tmp_poly);
-    std::vector<Polygon> intersections;
+    VectorWithMemoryTracking<Polygon> intersections;
     if (is_last_covered_)
         first_covered = polygon_ids_.back();
     for (size_t i = 0; i + is_last_covered_ < polygon_ids_.size(); ++i)
     {
-        std::vector<Polygon> intersection;
+        VectorWithMemoryTracking<Polygon> intersection;
         bg::intersection(tmp_poly, polygons_[polygon_ids_[i]], intersection);
         for (auto & polygon : intersection)
             intersections.emplace_back(std::move(polygon));
@@ -66,16 +66,16 @@ const FinalCellWithSlabs * FinalCellWithSlabs::find(Coord, Coord) const
 }
 
 SlabsPolygonIndex::SlabsPolygonIndex(
-    const std::vector<Polygon> & polygons)
-    : log(&Poco::Logger::get("SlabsPolygonIndex")),
+    const VectorWithMemoryTracking<Polygon> & polygons)
+    : log(getLogger("SlabsPolygonIndex")),
       sorted_x(uniqueX(polygons))
 {
     indexBuild(polygons);
 }
 
-std::vector<Coord> SlabsPolygonIndex::uniqueX(const std::vector<Polygon> & polygons)
+VectorWithMemoryTracking<Coord> SlabsPolygonIndex::uniqueX(const VectorWithMemoryTracking<Polygon> & polygons)
 {
-    std::vector<Coord> all_x;
+    VectorWithMemoryTracking<Coord> all_x;
     for (const auto & poly : polygons)
     {
         for (const auto & point : poly.outer())
@@ -87,13 +87,13 @@ std::vector<Coord> SlabsPolygonIndex::uniqueX(const std::vector<Polygon> & polyg
     }
 
     /** Making all_x sorted and distinct */
-    std::sort(all_x.begin(), all_x.end());
+    ::sort(all_x.begin(), all_x.end());
     all_x.erase(std::unique(all_x.begin(), all_x.end()), all_x.end());
 
     return all_x;
 }
 
-void SlabsPolygonIndex::indexBuild(const std::vector<Polygon> & polygons)
+void SlabsPolygonIndex::indexBuild(const VectorWithMemoryTracking<Polygon> & polygons)
 {
     for (size_t i = 0; i < polygons.size(); ++i)
     {
@@ -104,7 +104,7 @@ void SlabsPolygonIndex::indexBuild(const std::vector<Polygon> & polygons)
     }
 
     /** Sorting edges of (left_point, right_point, polygon_id) in that order */
-    std::sort(all_edges.begin(), all_edges.end(), Edge::compareByLeftPoint);
+    ::sort(all_edges.begin(), all_edges.end(), Edge::compareByLeftPoint);
     for (size_t i = 0; i != all_edges.size(); ++i)
         all_edges[i].edge_id = i;
 
@@ -116,7 +116,7 @@ void SlabsPolygonIndex::indexBuild(const std::vector<Polygon> & polygons)
     {
         return Edge::compareByRightPoint(a, b);
     };
-    std::set<Edge, decltype(cmp)> interesting_edges(cmp);
+    SetWithMemoryTracking<Edge, decltype(cmp)> interesting_edges(cmp);
 
     /** Size of index (number of different x coordinates) */
     size_t n = 0;
@@ -127,9 +127,9 @@ void SlabsPolygonIndex::indexBuild(const std::vector<Polygon> & polygons)
     edges_index_tree.resize(2 * n);
 
     /** Map of interesting edge ids to the index of left x, the index of right x */
-    std::vector<size_t> edge_left(m, n), edge_right(m, n);
+    VectorWithMemoryTracking<size_t> edge_left(m, n);
+    VectorWithMemoryTracking<size_t> edge_right(m, n);
 
-    size_t total_index_edges = 0;
     size_t edges_it = 0;
     for (size_t l = 0, r = 1; r < sorted_x.size(); ++l, ++r)
     {
@@ -151,7 +151,7 @@ void SlabsPolygonIndex::indexBuild(const std::vector<Polygon> & polygons)
         }
     }
 
-    for (size_t i = 0; i != all_edges.size(); i++)
+    for (size_t i = 0; i != all_edges.size(); ++i)
     {
         size_t l = edge_left[i];
         size_t r = edge_right[i];
@@ -168,12 +168,10 @@ void SlabsPolygonIndex::indexBuild(const std::vector<Polygon> & polygons)
             if (l & 1)
             {
                 edges_index_tree[l++].emplace_back(all_edges[i]);
-                ++total_index_edges;
             }
             if (r & 1)
             {
                 edges_index_tree[--r].emplace_back(all_edges[i]);
-                ++total_index_edges;
             }
         }
     }
@@ -268,7 +266,7 @@ bool SlabsPolygonIndex::find(const Point & point, size_t & id) const
     Coord y = point.y();
 
     /** Not in bounding box */
-    if (x < sorted_x[0] || x > sorted_x.back())
+    if (x < sorted_x.front() || x > sorted_x.back())
         return false;
 
     bool found = false;
@@ -277,7 +275,7 @@ bool SlabsPolygonIndex::find(const Point & point, size_t & id) const
       * This vector will contain polygon ids of all crosses. Smallest id with odd number of
       * occurrences is the answer.
       */
-    std::vector<size_t> intersections;
+    VectorWithMemoryTracking<size_t> intersections;
     intersections.reserve(10);
 
     /** Find position of the slab with binary search by sorted_x */
@@ -298,7 +296,7 @@ bool SlabsPolygonIndex::find(const Point & point, size_t & id) const
     } while (pos != 0);
 
     /** Sort all ids and find smallest with odd occurrences */
-    std::sort(intersections.begin(), intersections.end());
+    ::sort(intersections.begin(), intersections.end());
     for (size_t i = 0; i < intersections.size(); i += 2)
     {
         if (i + 1 == intersections.size() || intersections[i] != intersections[i + 1])

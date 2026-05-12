@@ -2,13 +2,16 @@
 
 #include <Storages/FileLog/DirectoryWatcherBase.h>
 
-#include <base/logger_useful.h>
+#include <Common/Logger_fwd.h>
 
 #include <memory>
 #include <mutex>
+#include <unordered_map>
+#include <vector>
 
 namespace DB
 {
+class Exception;
 class StorageFileLog;
 
 class FileLogDirectoryWatcher
@@ -45,7 +48,7 @@ public:
 
 private:
     friend class DirectoryWatcherBase;
-    /// Here must pass by value, otherwise will lead to stack-use-of-scope
+    /// Here must pass by value, otherwise will lead to stack-use-of-scope.
     void onItemAdded(DirectoryWatcherBase::DirectoryEvent ev);
     void onItemRemoved(DirectoryWatcherBase::DirectoryEvent ev);
     void onItemModified(DirectoryWatcherBase::DirectoryEvent ev);
@@ -66,7 +69,7 @@ private:
     /// accessed in thread created by dw.
     Events events;
 
-    Poco::Logger * log;
+    LoggerPtr log;
 
     std::mutex mutex;
 

@@ -1,6 +1,10 @@
-set (SOURCE_DIR "${CMAKE_SOURCE_DIR}/contrib/snappy")
+set (SOURCE_DIR "${PROJECT_SOURCE_DIR}/contrib/snappy")
 
-set (SNAPPY_IS_BIG_ENDIAN 0)
+if (ARCH_S390X)
+    set (SNAPPY_IS_BIG_ENDIAN 1)
+else ()
+    set (SNAPPY_IS_BIG_ENDIAN 0)
+endif()
 
 set (HAVE_BYTESWAP_H 1)
 set (HAVE_SYS_MMAN_H 1)
@@ -14,10 +18,12 @@ set (HAVE_BUILTIN_CTZ 1)
 set (HAVE_FUNC_MMAP 1)
 set (HAVE_FUNC_SYSCONF 1)
 
-if (ARCH_AMD64 AND ENABLE_SSSE3)
+if (ARCH_AMD64 AND X86_ARCH_LEVEL VERSION_GREATER_EQUAL 2)
     set (SNAPPY_HAVE_SSSE3 1)
+    set (SNAPPY_HAVE_X86_CRC32 1)
 else ()
     set (SNAPPY_HAVE_SSSE3 0)
+    set (SNAPPY_HAVE_X86_CRC32 0)
 endif ()
 
 configure_file(
@@ -30,8 +36,9 @@ configure_file(
   "${SOURCE_DIR}/snappy-stubs-public.h.in"
   "${CMAKE_CURRENT_BINARY_DIR}/snappy-stubs-public.h")
 
-add_library(snappy "")
-target_sources(snappy
+add_library(_snappy "")
+add_library(ch_contrib::snappy ALIAS _snappy)
+target_sources(_snappy
   PRIVATE
     "${SOURCE_DIR}/snappy-internal.h"
     "${SOURCE_DIR}/snappy-stubs-internal.h"
@@ -40,5 +47,5 @@ target_sources(snappy
     "${SOURCE_DIR}/snappy-stubs-internal.cc"
     "${SOURCE_DIR}/snappy.cc")
 
-target_include_directories(snappy PUBLIC ${SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
-target_compile_definitions(snappy PRIVATE -DHAVE_CONFIG_H)
+target_include_directories(_snappy SYSTEM BEFORE PUBLIC ${SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
+target_compile_definitions(_snappy PRIVATE -DHAVE_CONFIG_H)

@@ -1,5 +1,6 @@
-import string
+import datetime
 import random
+import string
 import threading
 
 
@@ -11,11 +12,13 @@ class SafeThread(threading.Thread):
         super().__init__()
         self.target = target
         self.exception = None
+
     def run(self):
         try:
             self.target()
-        except Exception as e: # pylint: disable=broad-except
+        except Exception as e:  # pylint: disable=broad-except
             self.exception = e
+
     def join(self, timeout=None):
         super().join(timeout)
         if self.exception:
@@ -24,7 +27,7 @@ class SafeThread(threading.Thread):
 
 def random_string(length):
     letters = string.ascii_letters
-    return ''.join(random.choice(letters) for i in range(length))
+    return "".join(random.choice(letters) for i in range(length))
 
 
 def generate_values(date_str, count, sign=1):
@@ -34,10 +37,15 @@ def generate_values(date_str, count, sign=1):
 
 
 def replace_config(config_path, old, new):
-    config = open(config_path, 'r')
+    config = open(config_path, "r")
     config_lines = config.readlines()
     config.close()
     config_lines = [line.replace(old, new) for line in config_lines]
-    config = open(config_path, 'w')
+    config = open(config_path, "w")
     config.writelines(config_lines)
     config.close()
+
+
+# Prints the current time in UTC with microseconds.
+def format_current_time():
+    return datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')

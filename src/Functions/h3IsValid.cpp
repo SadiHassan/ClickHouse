@@ -1,4 +1,4 @@
-#include "config_functions.h"
+#include "config.h"
 
 #if USE_H3
 
@@ -7,7 +7,6 @@
 #include <Functions/FunctionFactory.h>
 #include <Functions/IFunction.h>
 #include <Common/typeid_cast.h>
-#include <base/range.h>
 
 #include <h3api.h>
 
@@ -17,6 +16,7 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int ILLEGAL_TYPE_OF_ARGUMENT;
+    extern const int ILLEGAL_COLUMN;
 }
 
 namespace
@@ -47,17 +47,35 @@ public:
         return std::make_shared<DataTypeUInt8>();
     }
 
+    DataTypePtr getReturnTypeForDefaultImplementationForDynamic() const override
+    {
+        return std::make_shared<DataTypeUInt8>();
+    }
+
     ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr &, size_t input_rows_count) const override
     {
-        const auto * col_hindex = arguments[0].column.get();
+        auto non_const_arguments = arguments;
+        for (auto & argument : non_const_arguments)
+            argument.column = argument.column->convertToFullColumnIfConst();
+
+        const auto * column = checkAndGetColumn<ColumnUInt64>(non_const_arguments[0].column.get());
+        if (!column)
+            throw Exception(
+                ErrorCodes::ILLEGAL_COLUMN,
+                "Illegal type {} of argument {} of function {}. Must be UInt64.",
+                arguments[0].type->getName(),
+                1,
+                getName());
+
+        const auto & data = column->getData();
 
         auto dst = ColumnVector<UInt8>::create();
         auto & dst_data = dst->getData();
         dst_data.resize(input_rows_count);
 
-        for (size_t row = 0; row < input_rows_count; row++)
+        for (size_t row = 0; row < input_rows_count; ++row)
         {
-            const UInt64 hindex = col_hindex->getUInt(row);
+            const UInt64 hindex = data[row];
 
             UInt8 is_valid = isValidCell(hindex) == 0 ? 0 : 1;
 
@@ -70,9 +88,43 @@ public:
 
 }
 
-void registerFunctionH3IsValid(FunctionFactory & factory)
+REGISTER_FUNCTION(H3IsValid)
 {
-    factory.registerFunction<FunctionH3IsValid>();
+    FunctionDocumentation::Description description = R"(
+Verifies whether the number is a valid [H3](https://h3geo.org/docs/core-library/h3Indexing/) index.
+    )";
+    FunctionDocumentation::Syntax syntax = "h3IsValid(h3index)";
+    FunctionDocumentation::Arguments arguments = {
+        {"h3index", "Hexagon index number.", {"UInt64"}}
+    };
+    FunctionDocumentation::ReturnedValue returned_value = {
+        "Returns `1` if the number is a valid H3 index, `0` otherwise.",
+        {"UInt8"}
+    };
+    FunctionDocumentation::Examples examples = {
+        {
+            "Check valid H3 index",
+            "SELECT h3IsValid(630814730351855103) AS isValid",
+            R"(
+┌─isValid─┐
+│       1 │
+└─────────┘
+            )"
+        },
+        {
+            "Check invalid H3 index",
+            "SELECT h3IsValid(12345) AS isValid",
+            R"(
+┌─isValid─┐
+│       0 │
+└─────────┘
+            )"
+        }
+    };
+    FunctionDocumentation::IntroducedIn introduced_in = {20, 1};
+    FunctionDocumentation::Category category = FunctionDocumentation::Category::Geo;
+    FunctionDocumentation documentation = {description, syntax, arguments, {}, returned_value, examples, introduced_in, category};
+    factory.registerFunction<FunctionH3IsValid>(documentation);
 }
 
 }

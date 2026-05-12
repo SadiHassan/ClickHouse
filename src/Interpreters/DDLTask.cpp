@@ -1,21 +1,49 @@
-#include <Interpreters/DDLTask.h>
-#include <Common/DNSResolver.h>
-#include <Common/isLocalAddress.h>
-#include <IO/WriteHelpers.h>
-#include <IO/ReadHelpers.h>
+#include <Access/AccessControl.h>
+#include <Access/Role.h>
+#include <Access/User.h>
+#include <Core/ServerSettings.h>
+#include <Core/ServerUUID.h>
+#include <Core/Settings.h>
+#include <Databases/DatabaseReplicated.h>
 #include <IO/Operators.h>
 #include <IO/ReadBufferFromString.h>
-#include <Poco/Net/NetException.h>
-#include <base/logger_useful.h>
+#include <IO/ReadHelpers.h>
+#include <IO/WriteHelpers.h>
+#include <Common/NetException.h>
+#include <Interpreters/Context.h>
+#include <Interpreters/DDLTask.h>
+#include <Interpreters/DDLWorker.h>
+#include <Interpreters/DatabaseCatalog.h>
+#include <Parsers/ASTQueryWithOnCluster.h>
+#include <Parsers/ASTQueryWithTableAndOutput.h>
 #include <Parsers/ParserQuery.h>
 #include <Parsers/parseQuery.h>
-#include <Parsers/ASTQueryWithOnCluster.h>
-#include <Parsers/formatAST.h>
-#include <Parsers/ASTQueryWithTableAndOutput.h>
-#include <Databases/DatabaseReplicated.h>
+#include <base/sort.h>
+#include <Poco/Net/NetException.h>
+#include <Common/DNSResolver.h>
+#include <Common/OpenTelemetryTraceContext.h>
+#include <Common/ZooKeeper/ZooKeeper.h>
+#include <Common/isLocalAddress.h>
+#include <Common/logger_useful.h>
+
 
 namespace DB
 {
+
+namespace Setting
+{
+    extern const SettingsBool allow_settings_after_format_in_insert;
+    extern const SettingsUInt64 distributed_ddl_entry_format_version;
+    extern const SettingsUInt64 log_queries_cut_to_length;
+    extern const SettingsUInt64 max_parser_depth;
+    extern const SettingsUInt64 max_parser_backtracks;
+    extern const SettingsUInt64 max_query_size;
+    }
+
+namespace ServerSetting
+{
+    extern const ServerSettingsBool distributed_ddl_use_initial_user_and_roles;
+}
 
 namespace ErrorCodes
 {
@@ -23,6 +51,15 @@ namespace ErrorCodes
     extern const int UNKNOWN_TYPE_OF_QUERY;
     extern const int INCONSISTENT_CLUSTER_DEFINITION;
     extern const int LOGICAL_ERROR;
+    extern const int DNS_ERROR;
+    extern const int UNKNOWN_USER;
+    extern const int UNKNOWN_ROLE;
+}
+
+
+String HostID::readableString() const
+{
+    return host_name + ":" + DB::toString(port);
 }
 
 HostID HostID::fromString(const String & host_port_str)
@@ -32,11 +69,24 @@ HostID HostID::fromString(const String & host_port_str)
     return res;
 }
 
+
 bool HostID::isLocalAddress(UInt16 clickhouse_port) const
+{
+    auto address = DNSResolver::instance().resolveAddress(host_name, port);
+    return DB::isLocalAddress(address, clickhouse_port);
+}
+
+bool HostID::isLoopbackHost() const
 {
     try
     {
-        return DB::isLocalAddress(DNSResolver::instance().resolveAddress(host_name, port), clickhouse_port);
+        auto address = DNSResolver::instance().resolveAddress(host_name, port);
+        return address.host().isLoopback();
+    }
+    catch (const DB::NetException &)
+    {
+        /// Avoid "Host not found" exceptions
+        return false;
     }
     catch (const Poco::Net::NetException &)
     {
@@ -47,16 +97,30 @@ bool HostID::isLocalAddress(UInt16 clickhouse_port) const
 
 void DDLLogEntry::assertVersion() const
 {
-    constexpr UInt64 max_version = 2;
-    if (version == 0 || max_version < version)
+    if (version == 0
+    /// NORMALIZE_CREATE_ON_INITIATOR_VERSION does not change the entry format, it uses versioin 2, so there shouldn't be such version
+    || version == NORMALIZE_CREATE_ON_INITIATOR_VERSION
+    || version > DDL_ENTRY_FORMAT_MAX_VERSION)
         throw Exception(ErrorCodes::UNKNOWN_FORMAT_VERSION, "Unknown DDLLogEntry format version: {}."
-                                                            "Maximum supported version is {}", version, max_version);
+                                                            "Maximum supported version is {}", version, DDL_ENTRY_FORMAT_MAX_VERSION);
 }
 
 void DDLLogEntry::setSettingsIfRequired(ContextPtr context)
 {
-    version = context->getSettingsRef().distributed_ddl_entry_format_version;
-    if (version == 2)
+    version = context->getSettingsRef()[Setting::distributed_ddl_entry_format_version];
+    if (version <= 0 || version > DDL_ENTRY_FORMAT_MAX_VERSION)
+        throw Exception(ErrorCodes::UNKNOWN_FORMAT_VERSION, "Unknown distributed_ddl_entry_format_version: {}."
+                                                            "Maximum supported version is {}.", version, DDL_ENTRY_FORMAT_MAX_VERSION);
+
+    parent_table_uuid = context->getParentTable();
+    if (parent_table_uuid.has_value())
+        version = std::max(version, PARENT_TABLE_UUID_VERSION);
+
+    /// NORMALIZE_CREATE_ON_INITIATOR_VERSION does not affect entry format in ZooKeeper
+    if (version == NORMALIZE_CREATE_ON_INITIATOR_VERSION)
+        version = SETTINGS_IN_ZK_VERSION;
+
+    if (version >= SETTINGS_IN_ZK_VERSION)
         settings.emplace(context->getSettingsRef().changes());
 }
 
@@ -67,7 +131,7 @@ String DDLLogEntry::toString() const
     wb << "version: " << version << "\n";
     wb << "query: " << escape << query << "\n";
 
-    bool write_hosts = version == 1 || !hosts.empty();
+    bool write_hosts = version == OLDEST_VERSION || !hosts.empty();
     if (write_hosts)
     {
         Strings host_id_strings(hosts.size());
@@ -77,13 +141,43 @@ String DDLLogEntry::toString() const
 
     wb << "initiator: " << initiator << "\n";
 
-    bool write_settings = 1 <= version && settings && !settings->empty();
+    bool write_settings = SETTINGS_IN_ZK_VERSION <= version && settings && !settings->empty();
     if (write_settings)
     {
         ASTSetQuery ast;
         ast.is_standalone = false;
         ast.changes = *settings;
-        wb << "settings: " << serializeAST(ast) << "\n";
+        wb << "settings: " << ast.formatWithSecretsOneLine() << "\n";
+    }
+
+    if (version >= OPENTELEMETRY_ENABLED_VERSION)
+        wb << "tracing: " << this->tracing_context;
+    /// NOTE: OPENTELEMETRY_ENABLED_VERSION has new line in TracingContext::serialize(), so no need to add one more
+
+    if (version >= PRESERVE_INITIAL_QUERY_ID_VERSION)
+    {
+        writeString("initial_query_id: ", wb);
+        writeEscapedString(initial_query_id, wb);
+        writeChar('\n', wb);
+    }
+
+    if (version >= BACKUP_RESTORE_FLAG_IN_ZK_VERSION)
+        wb << "is_backup_restore: " << is_backup_restore << "\n";
+
+    if (version >= PARENT_TABLE_UUID_VERSION)
+    {
+        wb << "parent: ";
+        if (parent_table_uuid.has_value())
+            wb << parent_table_uuid.value();
+        else
+            wb << "-";
+        wb << "\n";
+    }
+
+    if (version >= INITIATOR_USER_VERSION)
+    {
+        wb << "initiator_user: " << initiator_user << "\n";
+        wb << "initiator_roles: " << initiator_user_roles << "\n";
     }
 
     return wb.str();
@@ -98,7 +192,7 @@ void DDLLogEntry::parse(const String & data)
 
     Strings host_id_strings;
     rb >> "query: " >> escape >> query >> "\n";
-    if (version == 1)
+    if (version == OLDEST_VERSION)
     {
         rb >> "hosts: " >> host_id_strings >> "\n";
 
@@ -107,9 +201,8 @@ void DDLLogEntry::parse(const String & data)
         else
             initiator.clear();
     }
-    else if (version == 2)
+    else if (version >= SETTINGS_IN_ZK_VERSION)
     {
-
         if (!rb.eof() && *rb.position() == 'h')
             rb >> "hosts: " >> host_id_strings >> "\n";
         if (!rb.eof() && *rb.position() == 'i')
@@ -119,11 +212,50 @@ void DDLLogEntry::parse(const String & data)
             String settings_str;
             rb >> "settings: " >> settings_str >> "\n";
             ParserSetQuery parser{true};
-            constexpr UInt64 max_size = 4096;
             constexpr UInt64 max_depth = 16;
-            ASTPtr settings_ast = parseQuery(parser, settings_str, max_size, max_depth);
+            constexpr UInt64 max_backtracks = DBMS_DEFAULT_MAX_PARSER_BACKTRACKS;
+            ASTPtr settings_ast = parseQuery(
+                parser, settings_str, Context::getGlobalContextInstance()->getSettingsRef()[Setting::max_query_size], max_depth, max_backtracks);
             settings.emplace(std::move(settings_ast->as<ASTSetQuery>()->changes));
         }
+    }
+
+    if (version >= OPENTELEMETRY_ENABLED_VERSION)
+    {
+        if (!rb.eof() && *rb.position() == 't')
+            rb >> "tracing: " >> this->tracing_context;
+    }
+
+    if (version >= PRESERVE_INITIAL_QUERY_ID_VERSION)
+    {
+        checkString("initial_query_id: ", rb);
+        readEscapedString(initial_query_id, rb);
+        checkChar('\n', rb);
+    }
+
+    if (version >= BACKUP_RESTORE_FLAG_IN_ZK_VERSION)
+    {
+        checkString("is_backup_restore: ", rb);
+        readBoolText(is_backup_restore, rb);
+        checkChar('\n', rb);
+    }
+
+    if (version >= PARENT_TABLE_UUID_VERSION)
+    {
+        rb >> "parent: ";
+        if (!checkChar('-', rb))
+        {
+            UUID uuid;
+            rb >> uuid;
+            parent_table_uuid = uuid;
+        }
+        rb >> "\n";
+    }
+
+    if (version >= INITIATOR_USER_VERSION)
+    {
+        rb >> "initiator_user: " >> initiator_user >> "\n";
+        rb >> "initiator_roles: " >> initiator_user_roles >> "\n";
     }
 
     assertEOF(rb);
@@ -140,10 +272,18 @@ void DDLTaskBase::parseQueryFromEntry(ContextPtr context)
 {
     const char * begin = entry.query.data();
     const char * end = begin + entry.query.size();
+    const auto & settings = context->getSettingsRef();
 
-    ParserQuery parser_query(end);
+    ParserQuery parser_query(end, settings[Setting::allow_settings_after_format_in_insert]);
     String description;
-    query = parseQuery(parser_query, begin, end, description, 0, context->getSettingsRef().max_parser_depth);
+    query = parseQuery(parser_query, begin, end, description, 0, settings[Setting::max_parser_depth], settings[Setting::max_parser_backtracks]);
+}
+
+void DDLTaskBase::formatRewrittenQuery(ContextPtr context)
+{
+    /// Convert rewritten AST back to string.
+    query_str = query->formatWithSecretsOneLine();
+    query_for_logging = query->formatForLogging(context->getSettingsRef()[Setting::log_queries_cut_to_length]);
 }
 
 ContextMutablePtr DDLTaskBase::makeQueryContext(ContextPtr from_context, const ZooKeeperPtr & /*zookeeper*/)
@@ -151,27 +291,118 @@ ContextMutablePtr DDLTaskBase::makeQueryContext(ContextPtr from_context, const Z
     auto query_context = Context::createCopy(from_context);
     query_context->makeQueryContext();
     query_context->setCurrentQueryId(""); // generate random query_id
-    query_context->getClientInfo().query_kind = ClientInfo::QueryKind::SECONDARY_QUERY;
+    query_context->setQueryKind(ClientInfo::QueryKind::SECONDARY_QUERY);
+
+    const bool preserve_user = from_context->getServerSettings()[ServerSetting::distributed_ddl_use_initial_user_and_roles];
+    if (preserve_user && !entry.initiator_user.empty())
+    {
+        const auto & access_control = from_context->getAccessControl();
+
+        /// Find the user by name
+        auto user_id = access_control.find<User>(entry.initiator_user);
+        if (!user_id)
+            throw Exception(ErrorCodes::UNKNOWN_USER, "User '{}' required for executing distributed DDL query is not found on this instance", entry.initiator_user);
+
+        /// Find all roles by name
+        std::vector<UUID> role_ids;
+        role_ids.reserve(entry.initiator_user_roles.size());
+        for (const auto & role_name : entry.initiator_user_roles)
+        {
+            auto role_id = access_control.find<Role>(role_name);
+            if (!role_id)
+                throw Exception(ErrorCodes::UNKNOWN_ROLE, "Role '{}' required for executing distributed DDL query is not found on this instance", role_name);
+            role_ids.push_back(*role_id);
+        }
+
+        query_context->setUser(*user_id, role_ids);
+    }
+
     if (entry.settings)
-        query_context->applySettingsChanges(*entry.settings);
+    {
+        /// Clamp settings to the constraints of the local node, similar to how
+        /// TCPHandler handles secondary queries. Without this, settings from the
+        /// initiator node could bypass stricter constraints on worker nodes.
+        /// Work on a copy to avoid mutating the entry, which may be read later
+        /// (e.g. by DatabaseReplicatedTask::createSyncedNodeIfNeed) or retried.
+        auto settings_changes = *entry.settings;
+        query_context->clampToSettingsConstraints(settings_changes, SettingSource::QUERY);
+        query_context->applySettingsChanges(settings_changes);
+    }
+
     return query_context;
 }
 
 
-bool DDLTask::findCurrentHostID(ContextPtr global_context, Poco::Logger * log)
+bool DDLTask::findCurrentHostID(ContextPtr global_context, LoggerPtr log, const ZooKeeperPtr & zookeeper, const std::optional<std::string> & config_host_name)
 {
     bool host_in_hostlist = false;
+    std::exception_ptr first_exception = nullptr;
+
+    const auto maybe_secure_port = global_context->getTCPPortSecure();
+    const auto port = global_context->getTCPPort();
+
+    if (config_host_name)
+    {
+        if (!isSelfHostname(log, *config_host_name, maybe_secure_port, port))
+            throw Exception(
+                ErrorCodes::DNS_ERROR,
+                "{} is not a local address. Check parameter 'host_name' in the configuration",
+                *config_host_name);
+    }
 
     for (const HostID & host : entry.hosts)
     {
-        auto maybe_secure_port = global_context->getTCPPortSecure();
+        if (config_host_name)
+        {
+            if (config_host_name != host.host_name)
+                continue;
 
-        /// The port is considered local if it matches TCP or TCP secure port that the server is listening.
-        bool is_local_port = (maybe_secure_port && host.isLocalAddress(*maybe_secure_port))
-                             || host.isLocalAddress(global_context->getTCPPort());
+            if (maybe_secure_port != host.port && port != host.port)
+                continue;
 
-        if (!is_local_port)
+            host_in_hostlist = true;
+            host_id = host;
+            host_id_str = host.toString();
+            break;
+        }
+
+        try
+        {
+            if (!isSelfHostID(log, host, maybe_secure_port, port))
+                continue;
+
+            if (host.isLoopbackHost())
+            {
+                String current_host_id_str = host.toString();
+                String active_id = toString(ServerUUID::get());
+                String active_path = fs::path(global_context->getDDLWorker().getReplicasDir()) / current_host_id_str / "active";
+                String content;
+                Coordination::Stat stat;
+                if (!zookeeper->tryGet(active_path, content, &stat))
+                {
+                    LOG_TRACE(log, "HostID {} is a loopback host which has not been claimed by any replica", current_host_id_str);
+                    continue;
+                }
+
+                if (content != active_id)
+                {
+                    LOG_TRACE(log, "HostID {} is a loopback host which is claimed by another replica {}", current_host_id_str, content);
+                    continue;
+                }
+            }
+        }
+        catch (const Exception & e)
+        {
+            if (e.code() != ErrorCodes::DNS_ERROR)
+                throw;
+
+            if (!first_exception)
+                first_exception = std::current_exception();
+
+            /// Ignore unknown hosts (in case DNS record was removed)
+            /// We will rethrow exception if we don't find local host in the list.
             continue;
+        }
 
         if (host_in_hostlist)
         {
@@ -187,14 +418,36 @@ bool DDLTask::findCurrentHostID(ContextPtr global_context, Poco::Logger * log)
         }
     }
 
+    if (!host_in_hostlist && first_exception)
+    {
+        if (zookeeper->exists(getFinishedNodePath()))
+        {
+            LOG_WARNING(log, "Failed to find current host ID, but assuming that {} is finished because {} exists. Skipping the task. Error: {}",
+                        entry_name, getFinishedNodePath(), getExceptionMessage(first_exception, /*with_stacktrace*/ true));
+            return false;
+        }
+
+        size_t finished_nodes_count = zookeeper->getChildren(fs::path(entry_path) / "finished").size();
+        if (entry.hosts.size() == finished_nodes_count)
+        {
+            LOG_WARNING(log, "Failed to find current host ID, but assuming that {} is finished because the number of finished nodes ({}) "
+                        "equals to the number of hosts in list. Skipping the task. Error: {}",
+                        entry_name, finished_nodes_count, getExceptionMessage(first_exception, /*with_stacktrace*/ true));
+            return false;
+        }
+
+        /// We don't know for sure if we should process task or not
+        std::rethrow_exception(first_exception);
+    }
+
     return host_in_hostlist;
 }
 
-void DDLTask::setClusterInfo(ContextPtr context, Poco::Logger * log)
+void DDLTask::setClusterInfo(ContextPtr context, LoggerPtr log)
 {
     auto * query_on_cluster = dynamic_cast<ASTQueryWithOnCluster *>(query.get());
     if (!query_on_cluster)
-        throw Exception("Received unknown DDL query", ErrorCodes::UNKNOWN_TYPE_OF_QUERY);
+        throw Exception(ErrorCodes::UNKNOWN_TYPE_OF_QUERY, "Received unknown DDL query");
 
     cluster_name = query_on_cluster->cluster;
     cluster = context->tryGetCluster(cluster_name);
@@ -221,7 +474,11 @@ void DDLTask::setClusterInfo(ContextPtr context, Poco::Logger * log)
                  host_id.readableString(), entry_name, address_in_cluster.readableString(), cluster_name);
     }
 
-    query = query_on_cluster->getRewrittenASTWithoutOnCluster(address_in_cluster.default_database);
+    /// Rewrite AST without ON CLUSTER.
+    WithoutOnClusterASTRewriteParams params;
+    params.default_database = address_in_cluster.default_database;
+    params.host_id = address_in_cluster.toString();
+    query = query_on_cluster->getRewrittenASTWithoutOnCluster(params);
     query_on_cluster = nullptr;
 }
 
@@ -247,21 +504,25 @@ bool DDLTask::tryFindHostInCluster()
                                         "There are two exactly the same ClickHouse instances {} in cluster {}",
                                         address.readableString(), cluster_name);
                     }
-                    else
-                    {
-                        /* Circular replication is used.
+
+                    /* Circular replication is used.
                          * It is when every physical node contains
                          * replicas of different shards of the same table.
                          * To distinguish one replica from another on the same node,
                          * every shard is placed into separate database.
                          * */
-                        is_circular_replicated = true;
-                        auto * query_with_table = dynamic_cast<ASTQueryWithTableAndOutput *>(query.get());
-                        if (!query_with_table || !query_with_table->database)
-                        {
-                            throw Exception(ErrorCodes::INCONSISTENT_CLUSTER_DEFINITION,
-                                            "For a distributed DDL on circular replicated cluster its table name must be qualified by database name.");
-                        }
+                    is_circular_replicated = true;
+                    auto * query_with_table = dynamic_cast<ASTQueryWithTableAndOutput *>(query.get());
+
+                    /// For other DDLs like CREATE USER, there is no database name and should be executed successfully.
+                    if (query_with_table)
+                    {
+                        if (!query_with_table->database)
+                            throw Exception(
+                                ErrorCodes::INCONSISTENT_CLUSTER_DEFINITION,
+                                "For a distributed DDL on circular replicated cluster its table name "
+                                "must be qualified by database name.");
+
                         if (default_database == query_with_table->getDatabase())
                             return true;
                     }
@@ -299,13 +560,11 @@ bool DDLTask::tryFindHostInClusterViaResolving(ContextPtr context)
                                     "There are two the same ClickHouse instances in cluster {} : {} and {}",
                                     cluster_name, address_in_cluster.readableString(), address.readableString());
                 }
-                else
-                {
-                    found_via_resolving = true;
-                    host_shard_num = shard_num;
-                    host_replica_num = replica_num;
-                    address_in_cluster = address;
-                }
+
+                found_via_resolving = true;
+                host_shard_num = shard_num;
+                host_replica_num = replica_num;
+                address_in_cluster = address;
             }
         }
     }
@@ -324,13 +583,56 @@ String DDLTask::getShardID() const
     Strings replica_names;
     for (const Cluster::Address & address : shard_addresses)
         replica_names.emplace_back(address.readableString());
-    std::sort(replica_names.begin(), replica_names.end());
+    ::sort(replica_names.begin(), replica_names.end());
 
     String res;
     for (auto it = replica_names.begin(); it != replica_names.end(); ++it)
         res += *it + (std::next(it) != replica_names.end() ? "," : "");
 
     return res;
+}
+
+bool DDLTask::isSelfHostID(LoggerPtr log, const HostID & checking_host_id, std::optional<UInt16> maybe_self_secure_port, UInt16 self_port)
+{
+    try
+    {
+        return (maybe_self_secure_port && checking_host_id.isLocalAddress(*maybe_self_secure_port))
+            || checking_host_id.isLocalAddress(self_port);
+    }
+    catch (const DB::NetException & e)
+    {
+        /// Avoid "Host not found" exceptions
+        LOG_WARNING(log, "Unable to check if host {} is a local address, exception: {}", checking_host_id.host_name, e.displayText());
+        return false;
+    }
+    catch (const Poco::Net::NetException & e)
+    {
+        /// Avoid "Host not found" exceptions
+        LOG_WARNING(log, "Unable to check if host {} is a local address, exception: {}", checking_host_id.host_name, e.displayText());
+        return false;
+    }
+}
+
+bool DDLTask::isSelfHostname(
+    LoggerPtr log, const String & checking_host_name, std::optional<UInt16> maybe_self_secure_port, UInt16 self_port)
+{
+    try
+    {
+        return (maybe_self_secure_port && HostID(checking_host_name, *maybe_self_secure_port).isLocalAddress(*maybe_self_secure_port))
+            || HostID(checking_host_name, self_port).isLocalAddress(self_port);
+    }
+    catch (const DB::NetException & e)
+    {
+        /// Avoid "Host not found" exceptions
+        LOG_WARNING(log, "Unable to check if host {} is a local address, exception: {}", checking_host_name, e.displayText());
+        return false;
+    }
+    catch (const Poco::Net::NetException & e)
+    {
+        /// Avoid "Host not found" exceptions
+        LOG_WARNING(log, "Unable to check if host {} is a local address, exception: {}", checking_host_name, e.displayText());
+        return false;
+    }
 }
 
 DatabaseReplicatedTask::DatabaseReplicatedTask(const String & name, const String & path, DatabaseReplicated * database_)
@@ -351,16 +653,17 @@ void DatabaseReplicatedTask::parseQueryFromEntry(ContextPtr context)
     if (auto * ddl_query = dynamic_cast<ASTQueryWithTableAndOutput *>(query.get()))
     {
         /// Update database name with actual name of local database
-        assert(!ddl_query->database);
+        chassert(!ddl_query->database);
         ddl_query->setDatabase(database->getDatabaseName());
     }
+    formatRewrittenQuery(context);
 }
 
 ContextMutablePtr DatabaseReplicatedTask::makeQueryContext(ContextPtr from_context, const ZooKeeperPtr & zookeeper)
 {
     auto query_context = DDLTaskBase::makeQueryContext(from_context, zookeeper);
-    query_context->getClientInfo().query_kind = ClientInfo::QueryKind::SECONDARY_QUERY;
-    query_context->getClientInfo().is_replicated_database_internal = true;
+    query_context->setQueryKind(ClientInfo::QueryKind::SECONDARY_QUERY);
+    query_context->setQueryKindReplicatedDatabaseInternal();
     query_context->setCurrentDatabase(database->getDatabaseName());
 
     auto txn = std::make_shared<ZooKeeperMetadataTransaction>(zookeeper, database->zookeeper_path, is_initial_query, entry_path);
@@ -371,9 +674,23 @@ ContextMutablePtr DatabaseReplicatedTask::makeQueryContext(ContextPtr from_conte
         txn->addOp(zkutil::makeRemoveRequest(entry_path + "/try", -1));
         txn->addOp(zkutil::makeCreateRequest(entry_path + "/committed", host_id_str, zkutil::CreateMode::Persistent));
         txn->addOp(zkutil::makeSetRequest(database->zookeeper_path + "/max_log_ptr", toString(getLogEntryNumber(entry_name)), -1));
+
+        /// Make sure that we did not disable replicated DDL queries
+        const auto & macros = from_context->getMacros();
+        bool should_check_stop_flag = macros->getMacroMap().contains("replica");
+        if (should_check_stop_flag)
+        {
+            String stop_flag_path = "/clickhouse/stop_replicated_ddl_queries/{replica}";
+            stop_flag_path = macros->expand(stop_flag_path);
+
+            zookeeper->createAncestors(stop_flag_path);
+
+            txn->addOp(zkutil::makeCreateRequest(stop_flag_path, "", zkutil::CreateMode::Persistent));
+            txn->addOp(zkutil::makeRemoveRequest(stop_flag_path, -1));
+        }
     }
 
-    txn->addOp(zkutil::makeSetRequest(database->replica_path + "/log_ptr", toString(getLogEntryNumber(entry_name)), -1));
+    txn->addOp(getOpToUpdateLogPointer());
 
     for (auto & op : ops)
         txn->addOp(std::move(op));
@@ -382,14 +699,32 @@ ContextMutablePtr DatabaseReplicatedTask::makeQueryContext(ContextPtr from_conte
     return query_context;
 }
 
+Coordination::RequestPtr DatabaseReplicatedTask::getOpToUpdateLogPointer()
+{
+    return zkutil::makeSetRequest(database->replica_path + "/log_ptr", toString(getLogEntryNumber(entry_name)), -1);
+}
+
+void DatabaseReplicatedTask::createSyncedNodeIfNeed(const ZooKeeperPtr & zookeeper)
+{
+    assert(!completely_processed);
+    if (!entry.settings)
+        return;
+
+    Field value;
+    if (!entry.settings->tryGet("database_replicated_enforce_synchronous_settings", value))
+        return;
+
+    /// Bool type is really weird, sometimes it's Bool and sometimes it's UInt64...
+    assert(value.getType() == Field::Types::Bool || value.getType() == Field::Types::UInt64);
+    if (!value.safeGet<UInt64>())
+        return;
+
+    zookeeper->createIfNotExists(getSyncedNodePath(), "");
+}
+
 String DDLTaskBase::getLogEntryName(UInt32 log_entry_number)
 {
-    /// Sequential counter in ZooKeeper is Int32.
-    assert(log_entry_number < std::numeric_limits<Int32>::max());
-    constexpr size_t seq_node_digits = 10;
-    String number = toString(log_entry_number);
-    String name = "query-" + String(seq_node_digits - number.size(), '0') + number;
-    return name;
+    return zkutil::getSequentialNodeName("query-", log_entry_number);
 }
 
 UInt32 DDLTaskBase::getLogEntryNumber(const String & log_entry_name)
@@ -406,14 +741,32 @@ void ZooKeeperMetadataTransaction::commit()
     if (state != CREATED)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Incorrect state ({}), it's a bug", state);
     state = FAILED;
-    current_zookeeper->multi(ops);
+    current_zookeeper->multi(ops, /* check_session_valid */ true);
     state = COMMITTED;
+
+    if (finalizer)
+    {
+        finalizer();
+        finalizer = FinalizerCallback();
+    }
 }
 
 ClusterPtr tryGetReplicatedDatabaseCluster(const String & cluster_name)
 {
-    if (const auto * replicated_db = dynamic_cast<const DatabaseReplicated *>(DatabaseCatalog::instance().tryGetDatabase(cluster_name).get()))
-        return replicated_db->getCluster();
+    String name = cluster_name;
+    bool all_groups = false;
+    if (name.starts_with(DatabaseReplicated::ALL_GROUPS_CLUSTER_PREFIX))
+    {
+        name = name.substr(strlen(DatabaseReplicated::ALL_GROUPS_CLUSTER_PREFIX));
+        all_groups = true;
+    }
+
+    if (const auto * replicated_db = dynamic_cast<const DatabaseReplicated *>(DatabaseCatalog::instance().tryGetDatabase(name).get()))
+    {
+        if (all_groups)
+            return replicated_db->tryGetAllGroupsCluster();
+        return replicated_db->tryGetCluster();
+    }
     return {};
 }
 

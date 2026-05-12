@@ -1,4 +1,4 @@
-#include <Common/config.h>
+#include "config.h"
 
 #if USE_CASSANDRA
 
@@ -8,7 +8,7 @@
 #include <Columns/ColumnsNumber.h>
 #include <Core/ExternalResultDescription.h>
 #include <IO/ReadHelpers.h>
-#include "CassandraSource.h"
+#include <Dictionaries/CassandraSource.h>
 
 
 namespace DB
@@ -23,16 +23,16 @@ namespace ErrorCodes
 CassandraSource::CassandraSource(
     const CassSessionShared & session_,
     const String & query_str,
-    const Block & sample_block,
+    SharedHeader & sample_block,
     size_t max_block_size_)
-    : SourceWithProgress(sample_block)
+    : ISource(sample_block)
     , session(session_)
     , statement(query_str.c_str(), /*parameters count*/ 0)
     , max_block_size(max_block_size_)
     , has_more_pages(cass_true)
 {
-    description.init(sample_block);
-    cassandraCheck(cass_statement_set_paging_size(statement, max_block_size));
+    description.init(*sample_block);
+    cassandraCheck(cass_statement_set_paging_size(statement, static_cast<int>(max_block_size)));
 }
 
 void CassandraSource::insertValue(IColumn & column, ValueType type, const CassValue * cass_value)
@@ -143,7 +143,7 @@ void CassandraSource::insertValue(IColumn & column, ValueType type, const CassVa
             break;
         }
         default:
-            throw Exception(ErrorCodes::UNKNOWN_TYPE, "Unknown type : {}", std::to_string(static_cast<int>(type)));
+            throw Exception(ErrorCodes::UNKNOWN_TYPE, "Unknown type : {}", static_cast<int>(type));
     }
 }
 
@@ -188,7 +188,7 @@ Chunk CassandraSource::generate()
             {
                 ColumnNullable & column_nullable = assert_cast<ColumnNullable &>(*columns[col_idx]);
                 insertValue(column_nullable.getNestedColumn(), description.types[col_idx].first, val);
-                column_nullable.getNullMapData().emplace_back(0);
+                column_nullable.getNullMapData().emplace_back(false);
             }
             else
                 insertValue(*columns[col_idx], description.types[col_idx].first, val);
@@ -260,7 +260,7 @@ void CassandraSource::assertTypes(const CassResultPtr & result)
                 expected_text = "uuid";
                 break;
             default:
-                throw Exception(ErrorCodes::UNKNOWN_TYPE, "Unknown type : {}", std::to_string(static_cast<int>(description.types[i].first)));
+                throw Exception(ErrorCodes::UNKNOWN_TYPE, "Unknown type : {}", static_cast<int>(description.types[i].first));
         }
 
         CassValueType got = cass_result_column_type(result, i);

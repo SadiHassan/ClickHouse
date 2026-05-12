@@ -10,9 +10,8 @@ class ASTJSONPathRange : public IAST
 public:
     String getID(char) const override { return "ASTJSONPathRange"; }
 
-    ASTPtr clone() const override { return std::make_shared<ASTJSONPathRange>(*this); }
+    ASTPtr clone() const override { return make_intrusive<ASTJSONPathRange>(*this); }
 
-public:
     /// Ranges to lookup in json array ($[0, 1, 2, 4 to 9])
     /// Range is represented as <start, end (non-inclusive)>
     /// Single index is represented as <start, start + 1>

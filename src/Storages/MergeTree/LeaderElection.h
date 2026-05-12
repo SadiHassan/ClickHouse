@@ -1,10 +1,12 @@
 #pragma once
 
-#include <base/logger_useful.h>
+#include <filesystem>
+#include <Common/logger_useful.h>
+#include <base/sort.h>
 #include <Common/ZooKeeper/ZooKeeper.h>
 #include <Common/ZooKeeper/KeeperException.h>
-#include <Core/BackgroundSchedulePool.h>
 
+namespace fs = std::filesystem;
 
 namespace zkutil
 {
@@ -16,7 +18,7 @@ namespace zkutil
   * For now, every replica can become leader if there is no leader among replicas with old version.
   */
 
-void checkNoOldLeaders(Poco::Logger * log, ZooKeeper & zookeeper, const String path)
+inline void checkNoOldLeaders(LoggerPtr log, ZooKeeper & zookeeper, const String path)
 {
     /// Previous versions (before 21.12) used to create ephemeral sequential node path/leader_election-
     /// Replica with the lexicographically smallest node name becomes leader (before 20.6) or enables multi-leader mode (since 20.6)
@@ -32,8 +34,8 @@ void checkNoOldLeaders(Poco::Logger * log, ZooKeeper & zookeeper, const String p
         /// NOTE zookeeper_path/leader_election node must exist now, but maybe we will remove it in future versions.
         if (code == Coordination::Error::ZNONODE)
             return;
-        else if (code != Coordination::Error::ZOK)
-            throw KeeperException(code, path);
+        if (code != Coordination::Error::ZOK)
+            throw KeeperException::fromPath(code, path);
 
         Coordination::Requests ops;
 
@@ -48,7 +50,7 @@ void checkNoOldLeaders(Poco::Logger * log, ZooKeeper & zookeeper, const String p
         }
         else
         {
-            std::sort(potential_leaders.begin(), potential_leaders.end());
+            ::sort(potential_leaders.begin(), potential_leaders.end());
             if (potential_leaders.front() == persistent_multiple_leaders)
                 return;
 
@@ -76,7 +78,7 @@ void checkNoOldLeaders(Poco::Logger * log, ZooKeeper & zookeeper, const String p
         code = zookeeper.tryMulti(ops, res);
         if (code == Coordination::Error::ZOK)
             return;
-        else if (code == Coordination::Error::ZNOTEMPTY || code == Coordination::Error::ZNODEEXISTS || code == Coordination::Error::ZNONODE)
+        if (code == Coordination::Error::ZNOTEMPTY || code == Coordination::Error::ZNODEEXISTS || code == Coordination::Error::ZNONODE)
             LOG_INFO(log, "LeaderElection: leader suddenly changed or new node appeared, will retry");
         else
             KeeperMultiException::check(code, ops, res);

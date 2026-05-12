@@ -15,14 +15,12 @@ limitations under the License. */
 #include <QueryPipeline/BlockIO.h>
 #include <Interpreters/IInterpreter.h>
 #include <Parsers/IAST_fwd.h>
-#include <Storages/IStorage.h>
+#include <Storages/IStorage_fwd.h>
 #include <Storages/SelectQueryInfo.h>
 
 namespace DB
 {
 
-class IAST;
-using ASTPtr = std::shared_ptr<IAST>;
 using StoragePtr = std::shared_ptr<IStorage>;
 
 class InterpreterWatchQuery : public IInterpreter, WithContext

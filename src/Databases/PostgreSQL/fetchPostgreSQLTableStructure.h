@@ -1,6 +1,6 @@
 #pragma once
 
-#include "config_core.h"
+#include "config.h"
 
 #if USE_LIBPQXX
 #include <Core/PostgreSQL/ConnectionHolder.h>
@@ -12,9 +12,29 @@ namespace DB
 
 struct PostgreSQLTableStructure
 {
-    std::shared_ptr<NamesAndTypesList> columns = nullptr;
-    std::shared_ptr<NamesAndTypesList> primary_key_columns = nullptr;
-    std::shared_ptr<NamesAndTypesList> replica_identity_columns = nullptr;
+    struct PGAttribute
+    {
+        Int32 atttypid;
+        Int32 atttypmod;
+        Int32 attnum;
+        bool atthasdef;
+        char attgenerated;
+        std::string attr_def;
+    };
+    using Attributes = std::unordered_map<std::string, PGAttribute>;
+
+    struct ColumnsInfo
+    {
+        NamesAndTypesList columns;
+        Attributes attributes;
+        std::vector<std::string> names;
+        ColumnsInfo(NamesAndTypesList && columns_, Attributes && attributes_) : columns(columns_), attributes(attributes_) {}
+    };
+    using ColumnsInfoPtr = std::shared_ptr<ColumnsInfo>;
+
+    ColumnsInfoPtr physical_columns;
+    ColumnsInfoPtr primary_key_columns;
+    ColumnsInfoPtr replica_identity_columns;
 };
 
 using PostgreSQLTableStructurePtr = std::unique_ptr<PostgreSQLTableStructure>;
@@ -28,7 +48,7 @@ PostgreSQLTableStructure fetchPostgreSQLTableStructure(
 template<typename T>
 PostgreSQLTableStructure fetchPostgreSQLTableStructure(
     T & tx, const String & postgres_table, const String & postgres_schema, bool use_nulls = true,
-    bool with_primary_key = false, bool with_replica_identity_index = false);
+    bool with_primary_key = false, bool with_replica_identity_index = false, const Strings & columns = {});
 
 template<typename T>
 std::set<String> fetchPostgreSQLTablesList(T & tx, const String & postgres_schema);

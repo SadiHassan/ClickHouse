@@ -1,8 +1,7 @@
-#include <Storages/registerStorages.h>
 #include <Storages/StorageFactory.h>
+#include <Storages/registerStorages.h>
 
-#include <Common/config.h>
-#include "config_core.h"
+#include "config.h"
 
 namespace DB
 {
@@ -22,18 +21,45 @@ void registerStorageSet(StorageFactory & factory);
 void registerStorageJoin(StorageFactory & factory);
 void registerStorageView(StorageFactory & factory);
 void registerStorageMaterializedView(StorageFactory & factory);
-void registerStorageLiveView(StorageFactory & factory);
 void registerStorageGenerateRandom(StorageFactory & factory);
 void registerStorageExecutable(StorageFactory & factory);
 void registerStorageWindowView(StorageFactory & factory);
+void registerStorageLoop(StorageFactory & factory);
+void registerStorageFuzzQuery(StorageFactory & factory);
+void registerStorageTimeSeries(StorageFactory & factory);
+void registerStorageAlias(StorageFactory & factory);
+
+#if USE_ARROWFLIGHT
+void registerStorageArrowFlight(StorageFactory & factory);
+#endif
+
+#if USE_RAPIDJSON || USE_SIMDJSON
+void registerStorageFuzzJSON(StorageFactory & factory);
+#endif
 
 #if USE_AWS_S3
 void registerStorageS3(StorageFactory & factory);
-void registerStorageCOS(StorageFactory & factory);
+void registerStorageHudi(StorageFactory & factory);
+void registerStorageS3Queue(StorageFactory & factory);
+#endif
+
+#if USE_PARQUET && USE_DELTA_KERNEL_RS
+void registerStorageDeltaLake(StorageFactory & factory);
+#endif
+
+#if USE_AVRO
+void registerStorageIceberg(StorageFactory & factory);
+void registerStoragePaimon(StorageFactory & factory);
+#endif
+
+#if USE_AZURE_BLOB_STORAGE
+void registerStorageAzureQueue(StorageFactory & factory);
 #endif
 
 #if USE_HDFS
-void registerStorageHDFS(StorageFactory & factory);
+#  if USE_HIVE
+void registerStorageHive(StorageFactory & factory);
+#  endif
 #endif
 
 void registerStorageODBC(StorageFactory & factory);
@@ -43,7 +69,15 @@ void registerStorageJDBC(StorageFactory & factory);
 void registerStorageMySQL(StorageFactory & factory);
 #endif
 
+#if USE_MONGODB
 void registerStorageMongoDB(StorageFactory & factory);
+#endif
+#if USE_YTSAURUS
+void registerStorageYTsaurus(StorageFactory & factory);
+#endif
+
+void registerStorageRedis(StorageFactory & factory);
+
 
 #if USE_RDKAFKA
 void registerStorageKafka(StorageFactory & factory);
@@ -51,6 +85,10 @@ void registerStorageKafka(StorageFactory & factory);
 
 #if USE_AMQPCPP
 void registerStorageRabbitMQ(StorageFactory & factory);
+#endif
+
+#if USE_NATSIO
+void registerStorageNATS(StorageFactory & factory);
 #endif
 
 #if USE_ROCKSDB
@@ -62,10 +100,6 @@ void registerStoragePostgreSQL(StorageFactory & factory);
 void registerStorageMaterializedPostgreSQL(StorageFactory & factory);
 #endif
 
-#if USE_MYSQL || USE_LIBPQXX
-void registerStorageExternalDistributed(StorageFactory & factory);
-#endif
-
 #if USE_FILELOG
 void registerStorageFileLog(StorageFactory & factory);
 #endif
@@ -74,6 +108,9 @@ void registerStorageFileLog(StorageFactory & factory);
 void registerStorageSQLite(StorageFactory & factory);
 #endif
 
+void registerStorageKeeperMap(StorageFactory & factory);
+
+void registerStorageObjectStorage(StorageFactory & factory);
 
 void registerStorages()
 {
@@ -94,32 +131,63 @@ void registerStorages()
     registerStorageJoin(factory);
     registerStorageView(factory);
     registerStorageMaterializedView(factory);
-    registerStorageLiveView(factory);
     registerStorageGenerateRandom(factory);
     registerStorageExecutable(factory);
     registerStorageWindowView(factory);
+    registerStorageLoop(factory);
+    registerStorageFuzzQuery(factory);
+    registerStorageTimeSeries(factory);
+    registerStorageAlias(factory);
 
-    #if USE_AWS_S3
-    registerStorageS3(factory);
-    registerStorageCOS(factory);
-    #endif
+#if USE_ARROWFLIGHT
+    registerStorageArrowFlight(factory);
+#endif
 
-    #if USE_HDFS
-    registerStorageHDFS(factory);
-    #endif
+#if USE_RAPIDJSON || USE_SIMDJSON
+    registerStorageFuzzJSON(factory);
+#endif
+
+#if USE_AZURE_BLOB_STORAGE
+    registerStorageAzureQueue(factory);
+#endif
+
+#if USE_AVRO
+    registerStorageIceberg(factory);
+    registerStoragePaimon(factory);
+#endif
+
+#if USE_AWS_S3
+    registerStorageHudi(factory);
+    registerStorageS3Queue(factory);
+#endif
+
+#if USE_PARQUET && USE_DELTA_KERNEL_RS
+    registerStorageDeltaLake(factory);
+#endif
+
+#if USE_HDFS
+#  if USE_HIVE
+    registerStorageHive(factory);
+#  endif
+#endif
 
     registerStorageODBC(factory);
     registerStorageJDBC(factory);
 
-    #if USE_MYSQL
+#if USE_MYSQL
     registerStorageMySQL(factory);
-    #endif
+#endif
 
+#if USE_MONGODB
     registerStorageMongoDB(factory);
+#endif
 
-    #if USE_RDKAFKA
+    registerStorageYTsaurus(factory);
+    registerStorageRedis(factory);
+
+#if USE_RDKAFKA
     registerStorageKafka(factory);
-    #endif
+#endif
 
 #if USE_FILELOG
     registerStorageFileLog(factory);
@@ -127,24 +195,28 @@ void registerStorages()
 
 #if USE_AMQPCPP
     registerStorageRabbitMQ(factory);
-    #endif
+#endif
 
-    #if USE_ROCKSDB
+#if USE_NATSIO
+    registerStorageNATS(factory);
+#endif
+
+#if USE_ROCKSDB
     registerStorageEmbeddedRocksDB(factory);
-    #endif
+#endif
 
-    #if USE_LIBPQXX
+#if USE_LIBPQXX
     registerStoragePostgreSQL(factory);
     registerStorageMaterializedPostgreSQL(factory);
-    #endif
+#endif
 
-    #if USE_MYSQL || USE_LIBPQXX
-    registerStorageExternalDistributed(factory);
-    #endif
-
-    #if USE_SQLITE
+#if USE_SQLITE
     registerStorageSQLite(factory);
-    #endif
+#endif
+
+    registerStorageKeeperMap(factory);
+
+    registerStorageObjectStorage(factory);
 }
 
 }

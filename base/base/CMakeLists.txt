@@ -1,36 +1,39 @@
+add_compile_options("$<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:${COVERAGE_FLAGS}>")
+
+if (USE_CLANG_TIDY)
+    set (CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY_PATH}")
+endif ()
+
+configure_file(GitHash.cpp.in GitHash.generated.cpp)
+
 set (SRCS
     argsToConfig.cpp
+    cgroupsv2.cpp
     coverage.cpp
-    DateLUT.cpp
-    DateLUTImpl.cpp
     demangle.cpp
+    Decimal.cpp
+    getAvailableMemoryAmount.cpp
     getFQDNOrHostName.cpp
     getMemoryAmount.cpp
     getPageSize.cpp
     getThreadId.cpp
+    int8_to_string.cpp
+    IPv4andIPv6.cpp
+    itoa.cpp
     JSON.cpp
-    LineReader.cpp
     mremap.cpp
     phdr_cache.cpp
     preciseExp10.cpp
-    setTerminalEcho.cpp
     shift10.cpp
     sleep.cpp
     terminalColors.cpp
     errnoToString.cpp
-    getResource.cpp
-    StringRef.cpp
+    safeExit.cpp
+    throwError.cpp
+    Numa.cpp
+    GitHash.generated.cpp
+    wide_integer_to_string.cpp
 )
-
-if (ENABLE_REPLXX)
-    list (APPEND SRCS ReplxxLineReader.cpp)
-endif ()
-
-if (USE_DEBUG_HELPERS)
-    get_target_property(MAGIC_ENUM_INCLUDE_DIR magic_enum INTERFACE_INCLUDE_DIRECTORIES)
-    set (INCLUDE_DEBUG_HELPERS "-I\"${MAGIC_ENUM_INCLUDE_DIR}\" -include \"${ClickHouse_SOURCE_DIR}/base/base/iostream_debug_helpers.h\"")
-    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${INCLUDE_DEBUG_HELPERS}")
-endif ()
 
 add_library (common ${SRCS})
 
@@ -40,29 +43,35 @@ else ()
     target_compile_definitions(common PUBLIC WITH_COVERAGE=0)
 endif ()
 
-if (USE_INTERNAL_CCTZ)
-    set_source_files_properties(DateLUTImpl.cpp PROPERTIES COMPILE_DEFINITIONS USE_INTERNAL_CCTZ)
+if (WITH_COVERAGE_DEPTH)
+    target_compile_definitions(common PUBLIC WITH_COVERAGE_DEPTH=1)
+else ()
+    target_compile_definitions(common PUBLIC WITH_COVERAGE_DEPTH=0)
+endif ()
+
+if (TARGET ch_contrib::crc32_s390x)
+    target_link_libraries(common PUBLIC ch_contrib::crc32_s390x)
+endif()
+
+if (TARGET ch_contrib::numactl)
+    target_link_libraries(common PUBLIC ch_contrib::numactl)
 endif()
 
 target_include_directories(common PUBLIC .. "${CMAKE_CURRENT_BINARY_DIR}/..")
 
-if (OS_DARWIN AND NOT MAKE_STATIC_LIBRARIES)
-    target_link_libraries(common PUBLIC -Wl,-U,_inside_main)
-endif()
-
 target_link_libraries (common
     PUBLIC
-        ${CITYHASH_LIBRARIES}
+        ch_contrib::cityhash
         boost::headers_only
         boost::system
         Poco::Net
         Poco::Net::SSL
         Poco::Util
         Poco::Foundation
-        replxx
-        cctz
-        fmt
-        magic_enum
+        ch_contrib::replxx
+        ch_contrib::cctz
+        ch_contrib::fmt
+        ch_contrib::magic_enum
 )
 
 if (ENABLE_TESTS)

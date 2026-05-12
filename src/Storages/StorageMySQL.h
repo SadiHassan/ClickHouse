@@ -1,14 +1,12 @@
 #pragma once
 
-#include "config_core.h"
+#include "config.h"
 
 #if USE_MYSQL
 
-#include <base/shared_ptr_helper.h>
-
-#include <Storages/IStorage.h>
-#include <Storages/MySQL/MySQLSettings.h>
-#include <Storages/ExternalDataSourceConfiguration.h>
+#include <Processors/Sources/MySQLSource.h>
+#include <Processors/QueryPlan/ISourceStep.h>
+#include <Storages/StorageWithCommonVirtualColumns.h>
 #include <mysqlxx/PoolWithFailover.h>
 
 namespace Poco
@@ -19,13 +17,15 @@ class Logger;
 namespace DB
 {
 
+struct MySQLSettings;
+class NamedCollection;
+struct StorageID;
+
 /** Implements storage in the MySQL database.
   * Use ENGINE = mysql(host_port, database_name, table_name, user_name, password)
-  * Read only.
   */
-class StorageMySQL final : public shared_ptr_helper<StorageMySQL>, public IStorage, WithContext
+class StorageMySQL final : public StorageWithCommonVirtualColumns, WithContext
 {
-    friend struct shared_ptr_helper<StorageMySQL>;
 public:
     StorageMySQL(
         const StorageID & table_id_,
@@ -42,18 +42,55 @@ public:
 
     std::string getName() const override { return "MySQL"; }
 
-    Pipe read(
+    bool isExternalDatabase() const override { return true; }
+
+    static VirtualColumnsDescription createVirtuals();
+
+    void readImpl(
+        QueryPlan & query_plan,
         const Names & column_names,
-        const StorageMetadataPtr & /*metadata_snapshot*/,
+        const StorageSnapshotPtr & storage_snapshot,
         SelectQueryInfo & query_info,
         ContextPtr context,
-        QueryProcessingStage::Enum processed_stage,
-        size_t max_block_size,
-        unsigned num_streams) override;
+        QueryProcessingStage::Enum /*processed_stage*/,
+        size_t /*max_block_size*/,
+        size_t /*num_streams*/) override;
 
-    SinkToStoragePtr write(const ASTPtr & query, const StorageMetadataPtr & /*metadata_snapshot*/, ContextPtr context) override;
+    SinkToStoragePtr write(const ASTPtr & query, const StorageMetadataPtr & /*metadata_snapshot*/, ContextPtr context, bool async_insert) override;
 
-    static StorageMySQLConfiguration getConfiguration(ASTs engine_args, ContextPtr context_);
+    struct Configuration
+    {
+        using Addresses = std::vector<std::pair<String, UInt16>>;
+
+        String host;
+        UInt16 port = 0;
+        String username = "default";
+        String password;
+        String database;
+        String table;
+
+        String ssl_ca;
+        String ssl_cert;
+        String ssl_key;
+
+        bool replace_query = false;
+        String on_duplicate_clause;
+
+        Addresses addresses; /// Failover replicas.
+        String addresses_expr;
+    };
+
+    static Configuration getConfiguration(ASTs engine_args, ContextPtr context_, MySQLSettings & storage_settings, const StorageID * table_id = nullptr);
+
+    static Configuration processNamedCollectionResult(
+        const NamedCollection & named_collection, MySQLSettings & storage_settings,
+        ContextPtr context_, bool require_table = true);
+
+    static ColumnsDescription getTableStructureFromData(
+        mysqlxx::PoolWithFailover & pool_,
+        const String & database,
+        const String & table,
+        const ContextPtr & context_);
 
 private:
     friend class StorageMySQLSink;
@@ -63,11 +100,39 @@ private:
     bool replace_query;
     std::string on_duplicate_clause;
 
-    MySQLSettings mysql_settings;
+    std::unique_ptr<MySQLSettings> mysql_settings;
 
     mysqlxx::PoolWithFailoverPtr pool;
 
-    Poco::Logger * log;
+    LoggerPtr log;
+};
+
+class ReadFromMySQLStep final : public ISourceStep
+{
+public:
+    ReadFromMySQLStep(
+        const Block & sample_block_,
+        mysqlxx::PoolWithFailoverPtr pool_,
+        const std::string & query_str_,
+        const StreamSettings & mysql_input_stream_settings_
+    );
+
+    ReadFromMySQLStep(const ReadFromMySQLStep &) = default;
+    ReadFromMySQLStep(ReadFromMySQLStep &&) = default;
+
+    String getName() const override { return "ReadFromMySQL"; }
+
+    QueryPlanStepPtr clone() const override
+    {
+        return std::make_unique<ReadFromMySQLStep>(*this);
+    }
+
+    void initializePipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings & settings) override;
+
+private:
+    mysqlxx::PoolWithFailoverPtr pool;
+    String query_str;
+    const StreamSettings mysql_input_stream_settings;
 };
 
 }

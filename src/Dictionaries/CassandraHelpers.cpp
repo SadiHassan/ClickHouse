@@ -2,7 +2,7 @@
 
 #if USE_CASSANDRA
 #include <Common/Exception.h>
-#include <base/logger_useful.h>
+#include <Common/logger_useful.h>
 #include <mutex>
 
 namespace DB
@@ -47,7 +47,7 @@ void setupCassandraDriverLibraryLogging(CassLogLevel level)
 {
     std::call_once(setup_logging_flag, [level]()
     {
-        Poco::Logger * logger = &Poco::Logger::get("CassandraDriverLibrary");
+        Poco::Logger * logger = getRawLogger("CassandraDriverLibrary");
         cass_log_set_level(level);
         if (level != CASS_LOG_DISABLED)
             cass_log_set_callback(cassandraLogCallback, logger);
@@ -58,15 +58,15 @@ void cassandraLogCallback(const CassLogMessage * message, void * data)
 {
     Poco::Logger * logger = static_cast<Poco::Logger *>(data);
     if (message->severity == CASS_LOG_CRITICAL || message->severity == CASS_LOG_ERROR)
-        LOG_ERROR(logger, message->message);
+        LOG_ERROR(logger, fmt::runtime(message->message));
     else if (message->severity == CASS_LOG_WARN)
-        LOG_WARNING(logger, message->message);
+        LOG_WARNING(logger, fmt::runtime(message->message));
     else if (message->severity == CASS_LOG_INFO)
-        LOG_INFO(logger, message->message);
+        LOG_INFO(logger, fmt::runtime(message->message));
     else if (message->severity == CASS_LOG_DEBUG)
-        LOG_DEBUG(logger, message->message);
+        LOG_DEBUG(logger, fmt::runtime(message->message));
     else if (message->severity == CASS_LOG_TRACE)
-        LOG_TRACE(logger, message->message);
+        LOG_TRACE(logger, fmt::runtime(message->message));
 }
 
 }

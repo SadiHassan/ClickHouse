@@ -2,20 +2,25 @@
 
 #include <IO/Progress.h>
 #include <Processors/Transforms/ExceptionKeepingTransform.h>
+#include <Access/EnabledQuota.h>
 
 
 namespace DB
 {
 
 class QueryStatus;
+using QueryStatusPtr = std::shared_ptr<QueryStatus>;
 class ThreadStatus;
 
 /// Proxy class which counts number of written block, rows, bytes
 class CountingTransform final : public ExceptionKeepingTransform
 {
 public:
-    explicit CountingTransform(const Block & header, ThreadStatus * thread_status_ = nullptr)
-        : ExceptionKeepingTransform(header, header), thread_status(thread_status_) {}
+    explicit CountingTransform(
+        SharedHeader header,
+        std::shared_ptr<const EnabledQuota> quota_ = nullptr)
+        : ExceptionKeepingTransform(header, header)
+        , quota(std::move(quota_)) {}
 
     String getName() const override { return "CountingTransform"; }
 
@@ -24,23 +29,26 @@ public:
         progress_callback = callback;
     }
 
-    void setProcessListElement(QueryStatus * elem)
+    void setProcessListElement(QueryStatusPtr elem)
     {
         process_elem = elem;
     }
 
-    const Progress & getProgress() const
+    void onConsume(Chunk chunk) override;
+    GenerateResult onGenerate() override
     {
-        return progress;
+        GenerateResult res;
+        res.chunk = std::move(cur_chunk);
+        return res;
     }
 
-    void transform(Chunk & chunk) override;
-
 protected:
-    Progress progress;
     ProgressCallback progress_callback;
-    QueryStatus * process_elem = nullptr;
-    ThreadStatus * thread_status = nullptr;
+    QueryStatusPtr process_elem;
+
+    /// Quota is used to limit amount of written bytes.
+    std::shared_ptr<const EnabledQuota> quota;
+    Chunk cur_chunk;
 };
 
 }

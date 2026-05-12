@@ -1,12 +1,16 @@
 #pragma once
 
-#include <AggregateFunctions/IAggregateFunction.h>
+#include <AggregateFunctions/IAggregateFunction_fwd.h>
 #include <Core/ColumnNumbers.h>
+#include <Core/Field.h>
 #include <Core/Names.h>
 #include <Core/Types.h>
 
 namespace DB
 {
+
+class WriteBuffer;
+struct ExplainFormatSettings;
 
 namespace JSONBuilder { class JSONMap; }
 
@@ -14,14 +18,18 @@ struct AggregateDescription
 {
     AggregateFunctionPtr function;
     Array parameters;        /// Parameters of the (parametric) aggregate function.
-    ColumnNumbers arguments;
-    Names argument_names;    /// used if no `arguments` are specified.
+    Names argument_names;
     String column_name;      /// What name to use for a column with aggregate function values
 
-    void explain(WriteBuffer & out, size_t indent) const; /// Get description for EXPLAIN query.
+    void explain(WriteBuffer & out, const std::string & prefix, size_t additonal_indent) const; /// Get description for EXPLAIN query.
     void explain(JSONBuilder::JSONMap & map) const;
+
+    void explainPretty(ExplainFormatSettings & settings) const;
 };
 
 using AggregateDescriptions = std::vector<AggregateDescription>;
+
+void serializeAggregateDescriptions(const AggregateDescriptions & aggregates, WriteBuffer & out);
+void deserializeAggregateDescriptions(AggregateDescriptions & aggregates, ReadBuffer & in);
 
 }

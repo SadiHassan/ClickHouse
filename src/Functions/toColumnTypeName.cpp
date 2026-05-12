@@ -1,3 +1,4 @@
+#include <Columns/IColumn.h>
 #include <Functions/IFunction.h>
 #include <Functions/FunctionFactory.h>
 #include <DataTypes/DataTypeString.h>
@@ -26,15 +27,13 @@ public:
 
     bool useDefaultImplementationForNulls() const override { return false; }
 
-    bool isShortCircuit(ShortCircuitSettings & settings, size_t /*number_of_arguments*/) const override
-    {
-        settings.enable_lazy_execution_for_first_argument = true;
-        settings.enable_lazy_execution_for_common_descendants_of_arguments = true;
-        settings.force_enable_lazy_execution = true;
-        return true;
-    }
+    bool useDefaultImplementationForNothing() const override { return false; }
+
+    bool useDefaultImplementationForLowCardinalityColumns() const override { return false; }
 
     bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo & /*arguments*/) const override { return false; }
+
+    bool isDeterministic() const override { return false; }
 
     size_t getNumberOfArguments() const override
     {
@@ -59,9 +58,35 @@ public:
 
 }
 
-void registerFunctionToColumnTypeName(FunctionFactory & factory)
+REGISTER_FUNCTION(ToColumnTypeName)
 {
-    factory.registerFunction<FunctionToColumnTypeName>();
+    FunctionDocumentation::Description description = R"(
+Returns the internal name of the data type of the given value.
+Unlike function [`toTypeName`](#toTypeName), the returned data type potentially includes internal wrapper columns like `Const` and `LowCardinality`.
+)";
+    FunctionDocumentation::Syntax syntax = "toColumnTypeName(value)";
+    FunctionDocumentation::Arguments arguments = {
+        {"value", "Value for which to return the internal data type.", {"Any"}}
+    };
+    FunctionDocumentation::ReturnedValue returned_value = {"Returns the internal data type used to represent the value.", {"String"}};
+    FunctionDocumentation::Examples examples = {
+    {
+        "Usage example",
+        R"(
+SELECT toColumnTypeName(CAST('2025-01-01 01:02:03' AS DateTime));
+        )",
+        R"(
+┌─toColumnTypeName(CAST('2025-01-01 01:02:03', 'DateTime'))─┐
+│ Const(UInt32)                                             │
+└───────────────────────────────────────────────────────────┘
+        )"
+    }
+    };
+    FunctionDocumentation::IntroducedIn introduced_in = {1, 1};
+    FunctionDocumentation::Category category = FunctionDocumentation::Category::Other;
+    FunctionDocumentation documentation = {description, syntax, arguments, {}, returned_value, examples, introduced_in, category};
+
+    factory.registerFunction<FunctionToColumnTypeName>(documentation);
 }
 
 }

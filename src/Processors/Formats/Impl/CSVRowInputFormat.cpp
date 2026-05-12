@@ -1,13 +1,22 @@
 #include <IO/ReadHelpers.h>
+#include <IO/ReadBufferFromString.h>
 #include <IO/BufferWithOwnMemory.h>
 #include <IO/Operators.h>
 
+#include <Columns/IColumn.h>
+#include <Common/assert_cast.h>
+#include <Common/logger_useful.h>
 #include <Formats/verbosePrintString.h>
 #include <Formats/registerWithNamesAndTypes.h>
 #include <Formats/FormatFactory.h>
+#include <Formats/ReadSchemaUtils.h>
+#include <Formats/EscapingRuleUtils.h>
 #include <Processors/Formats/Impl/CSVRowInputFormat.h>
 #include <DataTypes/Serializations/SerializationNullable.h>
-#include <DataTypes/DataTypeNothing.h>
+#include <DataTypes/DataTypeString.h>
+#include <DataTypes/DataTypeNullable.h>
+#include <DataTypes/DataTypeTuple.h>
+
 
 namespace DB
 {
@@ -19,24 +28,164 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
+namespace
+{
+    void checkBadDelimiter(char delimiter, bool allow_whitespace_or_tab_as_delimiter)
+    {
+        if ((delimiter == ' ' || delimiter == '\t') && allow_whitespace_or_tab_as_delimiter)
+        {
+            return;
+        }
+        constexpr std::string_view bad_delimiters = " \t\"'.UL";
+        if (bad_delimiters.contains(delimiter))
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "CSV format may not work correctly with delimiter '{}'. Try use CustomSeparated format instead",
+                delimiter);
+    }
+}
+
 CSVRowInputFormat::CSVRowInputFormat(
-    const Block & header_,
+    SharedHeader header_,
     ReadBuffer & in_,
     const Params & params_,
     bool with_names_,
     bool with_types_,
     const FormatSettings & format_settings_)
-    : RowInputFormatWithNamesAndTypes(header_, in_, params_, with_names_, with_types_, format_settings_)
+    : CSVRowInputFormat(
+        header_, std::make_shared<PeekableReadBuffer>(in_), params_, with_names_, with_types_, format_settings_)
 {
-    const String bad_delimiters = " \t\"'.UL";
-    if (bad_delimiters.find(format_settings.csv.delimiter) != String::npos)
-        throw Exception(
-            String("CSV format may not work correctly with delimiter '") + format_settings.csv.delimiter
-                + "'. Try use CustomSeparated format instead.",
-            ErrorCodes::BAD_ARGUMENTS);
 }
 
-static void skipEndOfLine(ReadBuffer & in)
+CSVRowInputFormat::CSVRowInputFormat(
+    SharedHeader header_,
+    std::shared_ptr<PeekableReadBuffer> in_,
+    const Params & params_,
+    bool with_names_,
+    bool with_types_,
+    const FormatSettings & format_settings_,
+    std::unique_ptr<CSVFormatReader> format_reader_)
+    : RowInputFormatWithNamesAndTypes(
+        header_,
+        *in_,
+        params_,
+        false,
+        with_names_,
+        with_types_,
+        format_settings_,
+        std::move(format_reader_),
+        format_settings_.csv.try_detect_header,
+        format_settings_.csv.allow_variable_number_of_columns),
+    buf(std::move(in_))
+{
+    checkBadDelimiter(format_settings_.csv.delimiter, format_settings_.csv.allow_whitespace_or_tab_as_delimiter);
+}
+
+CSVRowInputFormat::CSVRowInputFormat(
+    SharedHeader header_,
+    std::shared_ptr<PeekableReadBuffer> in_,
+    const Params & params_,
+    bool with_names_,
+    bool with_types_,
+    const FormatSettings & format_settings_)
+    : RowInputFormatWithNamesAndTypes(
+        header_,
+        *in_,
+        params_,
+        false,
+        with_names_,
+        with_types_,
+        format_settings_,
+        std::make_unique<CSVFormatReader>(*in_, format_settings_),
+        format_settings_.csv.try_detect_header,
+        format_settings_.csv.allow_variable_number_of_columns),
+    buf(std::move(in_))
+{
+    checkBadDelimiter(format_settings_.csv.delimiter, format_settings_.csv.allow_whitespace_or_tab_as_delimiter);
+}
+
+void CSVRowInputFormat::syncAfterError()
+{
+    skipToNextLineOrEOF(*buf);
+}
+
+void CSVRowInputFormat::setReadBuffer(ReadBuffer & in_)
+{
+    buf = std::make_unique<PeekableReadBuffer>(in_);
+    RowInputFormatWithNamesAndTypes::setReadBuffer(*buf);
+}
+
+void CSVRowInputFormat::resetReadBuffer()
+{
+    buf.reset();
+    RowInputFormatWithNamesAndTypes::resetReadBuffer();
+}
+
+void CSVFormatReader::skipRow()
+{
+    bool quotes = false;
+    ReadBuffer & istr = *buf;
+
+    while (!istr.eof())
+    {
+        if (quotes)
+        {
+            auto * pos = find_first_symbols<'"'>(istr.position(), istr.buffer().end());
+            istr.position() = pos;
+
+            if (pos > istr.buffer().end())
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Position in buffer is out of bounds. There must be a bug.");
+            if (pos == istr.buffer().end())
+                continue;
+            if (*pos == '"')
+            {
+                ++istr.position();
+                if (!istr.eof() && *istr.position() == '"')
+                    ++istr.position();
+                else
+                    quotes = false;
+            }
+        }
+        else
+        {
+            auto * pos = find_first_symbols<'"', '\r', '\n'>(istr.position(), istr.buffer().end());
+            istr.position() = pos;
+
+            if (pos > istr.buffer().end())
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Position in buffer is out of bounds. There must be a bug.");
+            if (pos == istr.buffer().end())
+                continue;
+
+            if (*pos == '"')
+            {
+                quotes = true;
+                ++istr.position();
+                continue;
+            }
+
+            if (*pos == '\n')
+            {
+                ++istr.position();
+                if (!istr.eof() && *istr.position() == '\r')
+                    ++istr.position();
+                return;
+            }
+            if (*pos == '\r')
+            {
+                ++istr.position();
+                if (format_settings.csv.allow_cr_end_of_line)
+                    return;
+                if (!istr.eof() && *pos == '\n')
+                {
+                    ++pos;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+static void skipEndOfLine(ReadBuffer & in, bool allow_cr_end_of_line)
 {
     /// \n (Unix) or \r\n (DOS/Windows) or \n\r (Mac OS Classic)
 
@@ -51,107 +200,122 @@ static void skipEndOfLine(ReadBuffer & in)
         ++in.position();
         if (!in.eof() && *in.position() == '\n')
             ++in.position();
-        else
-            throw Exception("Cannot parse CSV format: found \\r (CR) not followed by \\n (LF)."
-                " Line must end by \\n (LF) or \\r\\n (CR LF) or \\n\\r.", ErrorCodes::INCORRECT_DATA);
+        else if (!allow_cr_end_of_line)
+            throw Exception(ErrorCodes::INCORRECT_DATA,
+                "Cannot parse CSV format: found \\r (CR) not followed by \\n (LF)."
+                " Line must end by \\n (LF) or \\r\\n (CR LF) or \\n\\r.");
     }
     else if (!in.eof())
-        throw Exception("Expected end of line", ErrorCodes::INCORRECT_DATA);
+        throw Exception(ErrorCodes::INCORRECT_DATA, "Expected end of line");
 }
 
 /// Skip `whitespace` symbols allowed in CSV.
-static inline void skipWhitespacesAndTabs(ReadBuffer & in)
+static inline void skipWhitespacesAndTabs(ReadBuffer & in, const bool & allow_whitespace_or_tab_as_delimiter)
 {
-    while (!in.eof()
-            && (*in.position() == ' '
-                || *in.position() == '\t'))
+    if (allow_whitespace_or_tab_as_delimiter)
+    {
+        return;
+    }
+    while (!in.eof() && (*in.position() == ' ' || *in.position() == '\t'))
         ++in.position();
 }
 
-void CSVRowInputFormat::skipFieldDelimiter()
+CSVFormatReader::CSVFormatReader(PeekableReadBuffer & buf_, const FormatSettings & format_settings_) : FormatWithNamesAndTypesReader(buf_, format_settings_), buf(&buf_)
 {
-    skipWhitespacesAndTabs(*in);
-    assertChar(format_settings.csv.delimiter, *in);
 }
 
-String CSVRowInputFormat::readFieldIntoString()
+void CSVFormatReader::skipFieldDelimiter()
 {
-    skipWhitespacesAndTabs(*in);
+    skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
+    assertChar(format_settings.csv.delimiter, *buf);
+}
+
+template <bool read_string>
+String CSVFormatReader::readCSVFieldIntoString()
+{
+    if (format_settings.csv.trim_whitespaces) [[likely]]
+        skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
+
     String field;
-    readCSVString(field, *in, format_settings.csv);
+    if constexpr (read_string)
+        readCSVString(field, *buf, format_settings.csv);
+    else
+        readCSVField(field, *buf, format_settings.csv);
     return field;
 }
 
-void CSVRowInputFormat::skipField()
+void CSVFormatReader::skipField()
 {
-    readFieldIntoString();
+    skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
+    NullOutput out;
+    readCSVStringInto(out, *buf, format_settings.csv);
 }
 
-void CSVRowInputFormat::skipRowEndDelimiter()
+void CSVFormatReader::skipRowEndDelimiter()
 {
-    skipWhitespacesAndTabs(*in);
+    skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
 
-    if (in->eof())
+    if (buf->eof())
         return;
 
     /// we support the extra delimiter at the end of the line
-    if (*in->position() == format_settings.csv.delimiter)
-        ++in->position();
+    if (*buf->position() == format_settings.csv.delimiter)
+        ++buf->position();
 
-    skipWhitespacesAndTabs(*in);
-    if (in->eof())
+    skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
+    if (buf->eof())
         return;
 
-    skipEndOfLine(*in);
+    skipEndOfLine(*buf, format_settings.csv.allow_cr_end_of_line);
 }
 
-void CSVRowInputFormat::skipHeaderRow()
+void CSVFormatReader::skipHeaderRow()
 {
     do
     {
         skipField();
-        skipWhitespacesAndTabs(*in);
-    }
-    while (checkChar(format_settings.csv.delimiter, *in));
+        skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
+    } while (checkChar(format_settings.csv.delimiter, *buf));
 
     skipRowEndDelimiter();
 }
 
-std::vector<String> CSVRowInputFormat::readHeaderRow()
+template <bool is_header>
+std::vector<String> CSVFormatReader::readRowImpl()
 {
     std::vector<String> fields;
     do
     {
-        fields.push_back(readFieldIntoString());
-        skipWhitespacesAndTabs(*in);
-    }
-    while (checkChar(format_settings.csv.delimiter, *in));
+        fields.push_back(readCSVFieldIntoString<is_header>());
+        skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
+    } while (checkChar(format_settings.csv.delimiter, *buf));
 
     skipRowEndDelimiter();
     return fields;
 }
 
-bool CSVRowInputFormat::parseFieldDelimiterWithDiagnosticInfo(WriteBuffer & out)
+bool CSVFormatReader::parseFieldDelimiterWithDiagnosticInfo(WriteBuffer & out)
 {
     const char delimiter = format_settings.csv.delimiter;
 
     try
     {
-        skipWhitespacesAndTabs(*in);
-        assertChar(delimiter, *in);
+        skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
+        assertChar(delimiter, *buf);
     }
     catch (const DB::Exception &)
     {
-        if (*in->position() == '\n' || *in->position() == '\r')
+        if (*buf->position() == '\n' || *buf->position() == '\r')
         {
-            out << "ERROR: Line feed found where delimiter (" << delimiter << ") is expected."
+            out << "ERROR: Line feed found where delimiter (" << delimiter
+                << ") is expected."
                    " It's like your file has less columns than expected.\n"
                    "And if your file has the right number of columns, maybe it has unescaped quotes in values.\n";
         }
         else
         {
             out << "ERROR: There is no delimiter (" << delimiter << "). ";
-            verbosePrintString(in->position(), in->position() + 1, out);
+            verbosePrintString(buf->position(), buf->position() + 1, out);
             out << " found instead.\n";
         }
         return false;
@@ -160,26 +324,26 @@ bool CSVRowInputFormat::parseFieldDelimiterWithDiagnosticInfo(WriteBuffer & out)
     return true;
 }
 
-bool CSVRowInputFormat::parseRowEndWithDiagnosticInfo(WriteBuffer & out)
+bool CSVFormatReader::parseRowEndWithDiagnosticInfo(WriteBuffer & out)
 {
-    skipWhitespacesAndTabs(*in);
+    skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
 
-    if (in->eof())
+    if (buf->eof())
         return true;
 
     /// we support the extra delimiter at the end of the line
-    if (*in->position() == format_settings.csv.delimiter)
+    if (*buf->position() == format_settings.csv.delimiter)
     {
-        ++in->position();
-        skipWhitespacesAndTabs(*in);
-        if (in->eof())
+        ++buf->position();
+        skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
+        if (buf->eof())
             return true;
     }
 
-    if (!in->eof() && *in->position() != '\n' && *in->position() != '\r')
+    if (!buf->eof() && *buf->position() != '\n' && *buf->position() != '\r')
     {
         out << "ERROR: There is no line feed. ";
-        verbosePrintString(in->position(), in->position() + 1, out);
+        verbosePrintString(buf->position(), buf->position() + 1, out);
         out << " found instead.\n"
                " It's like your file has more columns than expected.\n"
                "And if your file has the right number of columns, maybe it has an unquoted string value with a comma.\n";
@@ -187,27 +351,26 @@ bool CSVRowInputFormat::parseRowEndWithDiagnosticInfo(WriteBuffer & out)
         return false;
     }
 
-    skipEndOfLine(*in);
+    skipEndOfLine(*buf, format_settings.csv.allow_cr_end_of_line);
     return true;
 }
 
-void CSVRowInputFormat::syncAfterError()
+bool CSVFormatReader::readField(
+    IColumn & column,
+    const DataTypePtr & type,
+    const SerializationPtr & serialization,
+    bool is_last_file_column,
+    const String & /*column_name*/)
 {
-    skipToNextLineOrEOF(*in);
-}
+    if (format_settings.csv.trim_whitespaces || !isStringOrFixedString(removeNullable(type))) [[likely]]
+        skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
 
-bool CSVRowInputFormat::readField(IColumn & column, const DataTypePtr & type, const SerializationPtr & serialization, bool is_last_file_column, const String & /*column_name*/)
-{
-    skipWhitespacesAndTabs(*in);
-
-    const bool at_delimiter = !in->eof() && *in->position() == format_settings.csv.delimiter;
-    const bool at_last_column_line_end = is_last_file_column
-                                         && (in->eof() || *in->position() == '\n' || *in->position() == '\r');
+    const bool at_delimiter = !buf->eof() && *buf->position() == format_settings.csv.delimiter;
+    const bool at_last_column_line_end = is_last_file_column && (buf->eof() || *buf->position() == '\n' || *buf->position() == '\r');
 
     /// Note: Tuples are serialized in CSV as separate columns, but with empty_as_default or null_as_default
     /// only one empty or NULL column will be expected
-    if (format_settings.csv.empty_as_default
-        && (at_delimiter || at_last_column_line_end))
+    if (format_settings.csv.empty_as_default && (at_delimiter || at_last_column_line_end))
     {
         /// Treat empty unquoted column value as default value, if
         /// specified in the settings. Tuple columns might seem
@@ -215,21 +378,141 @@ bool CSVRowInputFormat::readField(IColumn & column, const DataTypePtr & type, co
         /// commas, which might be also used as delimiters. However,
         /// they do not contain empty unquoted fields, so this check
         /// works for tuples as well.
-        column.insertDefault();
-        return false;
+        ///
+        /// Exception: `Nullable(Tuple())` with zero elements serializes to
+        /// an empty field in CSV, so an empty value is its only valid
+        /// representation. Let it fall through to normal deserialization
+        /// instead of inserting NULL as the default.
+        bool is_nullable_empty_tuple = false;
+        if (type->isNullable())
+        {
+            if (const auto * tuple_type = typeid_cast<const DataTypeTuple *>(removeNullable(type).get()))
+                is_nullable_empty_tuple = tuple_type->getElements().empty();
+        }
+
+        if (!is_nullable_empty_tuple)
+        {
+            column.insertDefault();
+            return false;
+        }
     }
-    else if (format_settings.null_as_default && !type->isNullable() && !type->isLowCardinalityNullable())
+
+    if (format_settings.csv.use_default_on_bad_values)
+        return readFieldOrDefault(column, type, serialization);
+    return readFieldImpl(*buf, column, type, serialization);
+}
+
+bool CSVFormatReader::readFieldImpl(ReadBuffer & istr, DB::IColumn & column, const DB::DataTypePtr & type, const DB::SerializationPtr & serialization)
+{
+    if (format_settings.null_as_default && !isNullableOrLowCardinalityNullable(type))
     {
         /// If value is null but type is not nullable then use default value instead.
-        return SerializationNullable::deserializeTextCSVImpl(column, *in, format_settings, serialization);
+        return SerializationNullable::deserializeNullAsDefaultOrNestedTextCSV(column, istr, format_settings, serialization);
     }
-    else
+
+    /// Read the column normally.
+    serialization->deserializeTextCSV(column, istr, format_settings);
+    return true;
+}
+
+bool CSVFormatReader::readFieldOrDefault(DB::IColumn & column, const DB::DataTypePtr & type, const DB::SerializationPtr & serialization)
+{
+    String field;
+    readCSVField(field, *buf, format_settings.csv);
+    ReadBufferFromString tmp_buf(field);
+    bool is_bad_value = false;
+    bool res = false;
+
+    size_t col_size = column.size();
+    try
     {
-        /// Read the column normally.
-        serialization->deserializeTextCSV(column, *in, format_settings);
-        return true;
+        res = readFieldImpl(tmp_buf, column, type, serialization);
+        /// Check if we parsed the whole field successfully.
+        if (!field.empty() && !tmp_buf.eof())
+            is_bad_value = true;
+    }
+    catch (const Exception &)
+    {
+        is_bad_value = true;
+    }
+
+    if (!is_bad_value)
+        return res;
+
+    if (column.size() == col_size + 1)
+        column.popBack(1);
+    column.insertDefault();
+    return false;
+}
+
+void CSVFormatReader::skipPrefixBeforeHeader()
+{
+    for (size_t i = 0; i != format_settings.csv.skip_first_lines; ++i)
+    {
+        if (buf->eof())
+            break;
+        readRow();
     }
 }
+
+void CSVFormatReader::setReadBuffer(ReadBuffer & in_)
+{
+    buf = assert_cast<PeekableReadBuffer *>(&in_);
+    FormatWithNamesAndTypesReader::setReadBuffer(*buf);
+}
+
+bool CSVFormatReader::checkForSuffix()
+{
+    if (!format_settings.csv.skip_trailing_empty_lines)
+        return buf->eof();
+
+    PeekableReadBufferCheckpoint checkpoint(*buf);
+    while (checkChar('\n', *buf) || checkChar('\r', *buf));
+    if (buf->eof())
+        return true;
+
+    buf->rollbackToCheckpoint();
+    return false;
+}
+
+bool CSVFormatReader::checkForEndOfRow()
+{
+    skipWhitespacesAndTabs(*buf, format_settings.csv.allow_whitespace_or_tab_as_delimiter);
+    return buf->eof() || *buf->position() == '\n' || *buf->position() == '\r';
+}
+
+CSVSchemaReader::CSVSchemaReader(ReadBuffer & in_, bool with_names_, bool with_types_, const FormatSettings & format_settings_)
+    : FormatWithNamesAndTypesSchemaReader(
+        buf,
+        format_settings_,
+        with_names_,
+        with_types_,
+        &reader,
+        getDefaultDataTypeForEscapingRule(FormatSettings::EscapingRule::CSV),
+        format_settings_.csv.try_detect_header)
+    , buf(in_)
+    , reader(buf, format_settings_)
+{
+}
+
+std::optional<std::pair<std::vector<String>, DataTypes>> CSVSchemaReader::readRowAndGetFieldsAndDataTypes()
+{
+    if (buf.eof())
+        return {};
+
+    auto fields = reader.readRow();
+    auto data_types = tryInferDataTypesByEscapingRule(fields, format_settings, FormatSettings::EscapingRule::CSV);
+    return std::make_pair(std::move(fields), std::move(data_types));
+}
+
+std::optional<DataTypes> CSVSchemaReader::readRowAndGetDataTypesImpl()
+{
+    auto fields_with_types = readRowAndGetFieldsAndDataTypes();
+    if (!fields_with_types)
+        return {};
+    return std::move(fields_with_types->second);
+}
+
 
 void registerInputFormatCSV(FormatFactory & factory)
 {
@@ -241,19 +524,22 @@ void registerInputFormatCSV(FormatFactory & factory)
             IRowInputFormat::Params params,
             const FormatSettings & settings)
         {
-            return std::make_shared<CSVRowInputFormat>(sample, buf, std::move(params), with_names, with_types, settings);
+            return std::make_shared<CSVRowInputFormat>(std::make_shared<const Block>(sample), buf, std::move(params), with_names, with_types, settings);
         });
     };
 
     registerWithNamesAndTypes("CSV", register_func);
 }
 
-static std::pair<bool, size_t> fileSegmentationEngineCSVImpl(ReadBuffer & in, DB::Memory<> & memory, size_t min_chunk_size, size_t min_rows)
+std::pair<bool, size_t> fileSegmentationEngineCSVImpl(ReadBuffer & in, DB::Memory<> & memory, size_t min_bytes, size_t min_rows, size_t max_rows, const FormatSettings & settings)
 {
     char * pos = in.position();
     bool quotes = false;
     bool need_more_data = true;
     size_t number_of_rows = 0;
+
+    if (max_rows && (max_rows < min_rows))
+        max_rows = min_rows;
 
     while (loadAtPosition(in, memory, pos) && need_more_data)
     {
@@ -261,10 +547,10 @@ static std::pair<bool, size_t> fileSegmentationEngineCSVImpl(ReadBuffer & in, DB
         {
             pos = find_first_symbols<'"'>(pos, in.buffer().end());
             if (pos > in.buffer().end())
-                throw Exception("Position in buffer is out of bounds. There must be a bug.", ErrorCodes::LOGICAL_ERROR);
-            else if (pos == in.buffer().end())
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Position in buffer is out of bounds. There must be a bug.");
+            if (pos == in.buffer().end())
                 continue;
-            else if (*pos == '"')
+            if (*pos == '"')
             {
                 ++pos;
                 if (loadAtPosition(in, memory, pos) && *pos == '"')
@@ -277,34 +563,39 @@ static std::pair<bool, size_t> fileSegmentationEngineCSVImpl(ReadBuffer & in, DB
         {
             pos = find_first_symbols<'"', '\r', '\n'>(pos, in.buffer().end());
             if (pos > in.buffer().end())
-                throw Exception("Position in buffer is out of bounds. There must be a bug.", ErrorCodes::LOGICAL_ERROR);
-            else if (pos == in.buffer().end())
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Position in buffer is out of bounds. There must be a bug.");
+            if (pos == in.buffer().end())
                 continue;
-            else if (*pos == '"')
+
+            if (*pos == '"')
             {
                 quotes = true;
                 ++pos;
+                continue;
             }
-            else if (*pos == '\n')
+
+            if (*pos == '\n')
             {
-                ++number_of_rows;
-                if (memory.size() + static_cast<size_t>(pos - in.position()) >= min_chunk_size && number_of_rows >= min_rows)
-                    need_more_data = false;
                 ++pos;
                 if (loadAtPosition(in, memory, pos) && *pos == '\r')
                     ++pos;
             }
             else if (*pos == '\r')
             {
-                if (memory.size() + static_cast<size_t>(pos - in.position()) >= min_chunk_size && number_of_rows >= min_rows)
-                    need_more_data = false;
                 ++pos;
+                if (settings.csv.allow_cr_end_of_line)
+                    continue;
                 if (loadAtPosition(in, memory, pos) && *pos == '\n')
-                {
                     ++pos;
-                    ++number_of_rows;
-                }
+                else
+                    continue;
             }
+
+            ++number_of_rows;
+            if ((number_of_rows >= min_rows)
+                && ((memory.size() + static_cast<size_t>(pos - in.position()) >= min_bytes) || (number_of_rows == max_rows)))
+                need_more_data = false;
+
         }
     }
 
@@ -314,13 +605,40 @@ static std::pair<bool, size_t> fileSegmentationEngineCSVImpl(ReadBuffer & in, DB
 
 void registerFileSegmentationEngineCSV(FormatFactory & factory)
 {
+    auto register_func = [&](const String & format_name, bool, bool)
+    {
+        static constexpr size_t min_rows = 3; /// Make it 3 for header auto detection (first 3 rows must be always in the same segment).
+        factory.registerFileSegmentationEngineCreator(format_name, [](const FormatSettings & settings) -> FormatFactory::FileSegmentationEngine
+        {
+            return [settings] (ReadBuffer & in, DB::Memory<> & memory, size_t min_bytes, size_t max_rows)
+            {
+                return fileSegmentationEngineCSVImpl(in, memory, min_bytes, min_rows, max_rows, settings);
+            };
+        });
+    };
+
+    registerWithNamesAndTypes("CSV", register_func);
+    markFormatWithNamesAndTypesSupportsSamplingColumns("CSV", factory);
+}
+
+void registerCSVSchemaReader(FormatFactory & factory)
+{
     auto register_func = [&](const String & format_name, bool with_names, bool with_types)
     {
-        size_t min_rows = 1 + int(with_names) + int(with_types);
-        factory.registerFileSegmentationEngine(format_name, [min_rows](ReadBuffer & in, DB::Memory<> & memory, size_t min_chunk_size)
+        factory.registerSchemaReader(format_name, [with_names, with_types](ReadBuffer & buf, const FormatSettings & settings)
         {
-            return fileSegmentationEngineCSVImpl(in, memory, min_chunk_size, min_rows);
+            return std::make_shared<CSVSchemaReader>(buf, with_names, with_types, settings);
         });
+        if (!with_types)
+        {
+            factory.registerAdditionalInfoForSchemaCacheGetter(format_name, [with_names](const FormatSettings & settings)
+            {
+                String result = getAdditionalFormatInfoByEscapingRule(settings, FormatSettings::EscapingRule::CSV);
+                if (!with_names)
+                    result += fmt::format(", column_names_for_schema_inference={}, try_detect_header={}, skip_first_lines={}", settings.column_names_for_schema_inference, settings.csv.try_detect_header, settings.csv.skip_first_lines);
+                return result;
+            });
+        }
     };
 
     registerWithNamesAndTypes("CSV", register_func);

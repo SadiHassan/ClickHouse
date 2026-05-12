@@ -1,6 +1,12 @@
-#include <Processors/QueryPlan/IQueryPlanStep.h>
-#include <Processors/IProcessor.h>
+#include <Common/CurrentThread.h>
 #include <IO/Operators.h>
+#include <IO/WriteBufferFromString.h>
+#include <Interpreters/ActionsDAG.h>
+#include <Processors/IProcessor.h>
+#include <Processors/Port.h>
+#include <Processors/QueryPlan/IQueryPlanStep.h>
+#include <Processors/QueryPlan/QueryPlanFormat.h>
+#include <fmt/format.h>
 
 namespace DB
 {
@@ -8,14 +14,96 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
+    extern const int NOT_IMPLEMENTED;
 }
 
-const DataStream & IQueryPlanStep::getOutputStream() const
+IQueryPlanStep::IQueryPlanStep()
 {
-    if (!hasOutputStream())
-        throw Exception("QueryPlanStep " + getName() + " does not have output stream.", ErrorCodes::LOGICAL_ERROR);
+    step_index = CurrentThread::isInitialized() ? CurrentThread::get().getNextPlanStepIndex() : 0;
+}
 
-    return *output_stream;
+void IQueryPlanStep::updateInputHeaders(SharedHeaders input_headers_)
+{
+    input_headers = std::move(input_headers_);
+    updateOutputHeader();
+}
+
+void IQueryPlanStep::updateInputHeader(SharedHeader input_header, size_t idx)
+{
+    if (idx >= input_headers.size())
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "Cannot update input header {} for step {} because it has only {} headers",
+            idx, getName(), input_headers.size());
+
+    input_headers[idx] = input_header;
+    updateOutputHeader();
+}
+
+void IQueryPlanStep::setRuntimeDataflowStatisticsCacheUpdater(RuntimeDataflowStatisticsCacheUpdaterPtr updater)
+{
+    if (!supportsDataflowStatisticsCollection())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Step {} doesn't support dataflow statistics collection", getName());
+    dataflow_cache_updater = std::move(updater);
+}
+
+IQueryPlanStep::RemovedUnusedColumns IQueryPlanStep::removeUnusedColumns(NameMultiSet /*required_outputs*/, bool /*remove_inputs*/)
+{
+    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "removeUnusedColumns is not implemented for step {}", getName());
+}
+
+bool IQueryPlanStep::canRemoveColumnsFromOutput() const
+{
+    return false;
+}
+
+bool IQueryPlanStep::hasCorrelatedExpressions() const
+{
+    return false;
+}
+
+const SharedHeader & IQueryPlanStep::getOutputHeader() const
+{
+    if (!hasOutputHeader())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "QueryPlanStep {} does not have output stream.", getName());
+
+    return output_header;
+}
+
+std::string_view IQueryPlanStep::getStepDescription() const
+{
+    if (std::holds_alternative<std::string_view>(step_description))
+        return std::get<std::string_view>(step_description);
+    if (std::holds_alternative<std::string>(step_description))
+        return std::get<std::string>(step_description);
+
+    return {};
+}
+
+void IQueryPlanStep::setStepDescription(std::string description, size_t limit)
+{
+    if (description.size() > limit)
+    {
+        description.resize(limit);
+        description.shrink_to_fit();
+    }
+
+    step_description = std::move(description);
+}
+
+void IQueryPlanStep::setStepDescription(const IQueryPlanStep & step)
+{
+    step_description = step.step_description;
+}
+
+QueryPlanStepPtr IQueryPlanStep::clone() const
+{
+    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Cannot clone {} plan step", getName());
+}
+
+const SortDescription & IQueryPlanStep::getSortDescription() const
+{
+    static SortDescription empty;
+    return empty;
 }
 
 static void doDescribeHeader(const Block & header, size_t count, IQueryPlanStep::FormatSettings & settings)
@@ -30,7 +118,7 @@ static void doDescribeHeader(const Block & header, size_t count, IQueryPlanStep:
 
     settings.out << prefix;
 
-    if (!header)
+    if (header.empty())
     {
         settings.out << " empty\n";
         return;
@@ -86,7 +174,10 @@ static void doDescribeProcessor(const IProcessor & processor, size_t count, IQue
             doDescribeHeader(*last_header, num_equal_headers, settings);
     }
 
-    settings.offset += settings.indent;
+    if (!processor.getDescription().empty())
+        settings.out << String(settings.offset, settings.indent_char) << "Description: " << processor.getDescription() << '\n';
+
+    settings.offset += settings.base_indent;
 }
 
 void IQueryPlanStep::describePipeline(const Processors & processors, FormatSettings & settings)
@@ -109,5 +200,22 @@ void IQueryPlanStep::describePipeline(const Processors & processors, FormatSetti
     if (prev)
         doDescribeProcessor(*prev, count, settings);
 }
+
+void IQueryPlanStep::appendExtraProcessors(const Processors & extra_processors)
+{
+    processors.insert(processors.end(), extra_processors.begin(), extra_processors.end());
+}
+
+String IQueryPlanStep::getUniqID() const
+{
+    return fmt::format("{}_{}", getName(), step_index);
+}
+
+void IQueryPlanStep::serialize(Serialization & /*ctx*/) const
+{
+    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Method serialize is not implemented for {}", getName());
+}
+
+void IQueryPlanStep::updateOutputHeader() { throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Not implemented"); }
 
 }

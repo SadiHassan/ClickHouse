@@ -1,303 +1,263 @@
-# Third-party libraries may have substandard code.
+#"${folder}/CMakeLists.txt" Third-party libraries may have substandard code.
 
-set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -w")
-set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
+set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -w -ffunction-sections -fdata-sections")
+set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -ffunction-sections -fdata-sections")
+if (OS_LINUX)
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -faddrsig")
+    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -faddrsig")
+endif ()
 
-if (WITH_COVERAGE)
-  set (WITHOUT_COVERAGE_LIST ${WITHOUT_COVERAGE})
-  separate_arguments(WITHOUT_COVERAGE_LIST)
-  # disable coverage for contib files and build with optimisations
-  if (COMPILER_CLANG)
-      add_compile_options(-O3 -DNDEBUG -finline-functions -finline-hint-functions ${WITHOUT_COVERAGE_LIST})
-  else()
-      add_compile_options(-O3 -DNDEBUG -finline-functions ${WITHOUT_COVERAGE_LIST})
-  endif()
-endif()
-
-if (SANITIZE STREQUAL "undefined")
+if (SANITIZE STREQUAL "undefined" OR SANITIZE STREQUAL "address,undefined")
     # 3rd-party libraries usually not intended to work with UBSan.
     add_compile_options(-fno-sanitize=undefined)
 endif()
 
 set_property(DIRECTORY PROPERTY EXCLUDE_FROM_ALL 1)
+set(WITH_COVERAGE OFF)
+# add_contrib cmake_folder[ base_folder1[, ...base_folderN]]
+function(add_contrib cmake_folder)
+    if (ARGN)
+        set(base_folders ${ARGN})
+    else()
+        set(base_folders ${cmake_folder})
+    endif()
 
-add_subdirectory (abseil-cpp-cmake)
-add_subdirectory (magic-enum-cmake)
-add_subdirectory (boost-cmake)
-add_subdirectory (cctz-cmake)
-add_subdirectory (consistent-hashing)
-add_subdirectory (dragonbox-cmake)
-add_subdirectory (hyperscan-cmake)
-add_subdirectory (jemalloc-cmake)
-add_subdirectory (libcpuid-cmake)
-add_subdirectory (libdivide)
-add_subdirectory (libmetrohash)
-add_subdirectory (lz4-cmake)
-add_subdirectory (murmurhash)
-add_subdirectory (replxx-cmake)
-add_subdirectory (unixodbc-cmake)
-add_subdirectory (nanodbc-cmake)
+    foreach (base_folder ${base_folders})
+        # some typos in the code
+        if (NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${base_folder}")
+            message(FATAL_ERROR "No such base folder '${base_folder}' (for '${cmake_folder}' cmake folder). Typo in the base folder name?")
+        endif()
 
-if (USE_INTERNAL_CAPNP_LIBRARY AND NOT MISSING_INTERNAL_CAPNP_LIBRARY)
-    add_subdirectory(capnproto-cmake)
-endif ()
+        file(GLOB contrib_files "${base_folder}/*")
+        if (NOT contrib_files)
+            # Checking out *all* submodules takes > 5 min. Therefore, the smoke build ("FastTest") in CI initializes only the set of
+            # submodules minimally needed for a build and we cannot assume here that all submodules are populated.
+            message(STATUS "submodule ${base_folder} is missing or empty. to fix try run:")
+            message(STATUS "    git submodule update --init")
+            return()
+        endif()
+    endforeach()
+
+    message(STATUS "Adding contrib module ${base_folders} (configuring with ${cmake_folder})")
+    add_subdirectory (${cmake_folder})
+endfunction()
+
+# Use the original launchers for the projects that are needed for source code generation:
+# protoc and llvm-tlbgen.
+disable_heavy_build_check_if_needed()
+disable_dummy_launchers_if_needed()
+
+# We need to add OpenSSL first so that all our projects use our own version instead of the system one.
+add_contrib (openssl-cmake openssl)  # Needed for delta-lake
+add_contrib (abseil-cpp-cmake abseil-cpp)
+add_contrib (zlib-ng-cmake zlib-ng)
+add_contrib (google-protobuf-cmake google-protobuf)
+add_contrib (grpc-cmake grpc)
+add_contrib (compiler-rt-cmake llvm-project)
+add_contrib (libllvmlibc-cmake llvm-project)
+add_contrib (llvm-project-cmake llvm-project)
+
+enable_dummy_launchers_if_needed()
+enable_heavy_build_check_if_needed()
+
+add_contrib (miniselect-cmake miniselect)
+add_contrib (pdqsort-cmake pdqsort)
+add_contrib (pocketfft-cmake pocketfft)
+add_contrib (crc32-vpmsum-cmake crc32-vpmsum)
+add_contrib (sparsehash-c11-cmake sparsehash-c11)
+add_contrib (magic-enum-cmake magic_enum)
+add_contrib (boost-cmake boost)
+add_contrib (cctz-cmake cctz)
+add_contrib (consistent-hashing)
+add_contrib (zmij-cmake zmij)
+add_contrib (vectorscan-cmake vectorscan)
+add_contrib (jemalloc-cmake jemalloc)
+add_contrib (libcpuid-cmake libcpuid)
+add_contrib (libdivide-cmake)
+add_contrib (libmetrohash)
+add_contrib (lz4-cmake lz4)
+add_contrib (murmurhash)
+add_contrib (replxx-cmake replxx)
+add_contrib (capnproto-cmake capnproto)
+add_contrib (yaml-cpp-cmake yaml-cpp)
+add_contrib (re2-cmake re2)
+add_contrib (xz-cmake xz)
+add_contrib (brotli-cmake brotli)
+add_contrib (double-conversion-cmake double-conversion)
+add_contrib (croaring-cmake croaring)
+add_contrib (zstd-cmake zstd)
+add_contrib (bzip2-cmake bzip2)
+add_contrib (minizip-ng-cmake minizip-ng)
+add_contrib (snappy-cmake snappy)
+add_contrib (thrift-cmake thrift)
+add_contrib (StringZilla-cmake StringZilla)
+# parquet/arrow/orc
+add_contrib (arrow-cmake arrow) # requires: snappy, thrift, double-conversion
+add_contrib (avro-cmake avro) # requires: snappy
+add_contrib (openldap-cmake openldap)
+add_contrib (msgpack-c-cmake msgpack-c)
+add_contrib (libarchive-cmake libarchive)
+
+add_contrib (corrosion-cmake corrosion)
+add_contrib (delta-kernel-rs-cmake delta-kernel-rs)
+add_contrib (chdig-cmake chdig)
+add_contrib (wasmedge-cmake wasmedge)
 
 if (ENABLE_FUZZING)
-    add_subdirectory (libprotobuf-mutator-cmake)
+    add_contrib (libprotobuf-mutator-cmake libprotobuf-mutator)
 endif()
 
-if (USE_YAML_CPP)
-    add_subdirectory (yaml-cpp-cmake)
+add_contrib (wyhash-cmake wyhash)
+add_contrib (cityhash102)
+add_contrib (libfarmhash)
+add_contrib (icu-cmake icu)
+add_contrib (h3-cmake h3)
+add_contrib (mariadb-connector-c-cmake mariadb-connector-c)
+add_contrib (libfiu-cmake libfiu)
+
+if (ENABLE_TESTS)
+    add_contrib (googletest-cmake googletest)
 endif()
 
-if (USE_INTERNAL_XZ_LIBRARY)
-    add_subdirectory (xz-cmake)
+add_contrib (libfuzzer-cmake llvm-project)
+add_contrib (libxml2-cmake libxml2)
+
+add_contrib (aws-cmake
+    aws
+    aws-c-auth
+    aws-c-cal
+    aws-c-common
+    aws-c-compression
+    aws-c-event-stream
+    aws-c-http
+    aws-c-io
+    aws-c-mqtt
+    aws-c-s3
+    aws-c-sdkutils
+    aws-checksums
+    aws-crt-cpp
+    aws-cmake
+)
+
+add_contrib (base64-cmake base64)
+add_contrib (simdjson-cmake simdjson)
+add_contrib (rapidjson-cmake rapidjson)
+add_contrib (fastops-cmake fastops)
+add_contrib (libuv-cmake libuv)
+add_contrib (liburing-cmake liburing)
+add_contrib (amqpcpp-cmake AMQP-CPP) # requires: libuv
+add_contrib (cassandra-cmake cassandra) # requires: libuv
+add_contrib (curl-cmake curl)
+add_contrib (azure-cmake azure) # requires: curl
+add_contrib (fmtlib-cmake fmtlib)
+add_contrib (krb5-cmake krb5)
+add_contrib (cyrus-sasl-cmake cyrus-sasl) # for krb5
+add_contrib (libgsasl-cmake libgsasl) # requires krb5
+add_contrib (librdkafka-cmake librdkafka) # requires: libgsasl
+add_contrib (nats-io-cmake nats-io)
+add_contrib (isa-l-cmake isa-l)
+add_contrib (libhdfs3-cmake libhdfs3) # requires: google-protobuf, krb5, isa-l
+add_contrib (hive-metastore-cmake hive-metastore) # requires: thrift, avro, arrow, libhdfs3
+add_contrib (cppkafka-cmake cppkafka)
+
+option(ENABLE_LIBPQXX "Enable PostgreSQL" ${ENABLE_LIBRARIES})
+if (ENABLE_LIBPQXX)
+    add_contrib (postgres-cmake postgres)
+    add_contrib (libpqxx-cmake libpqxx)
 endif()
 
-add_subdirectory (poco-cmake)
-add_subdirectory (croaring-cmake)
+add_contrib (rocksdb-cmake rocksdb) # requires: jemalloc, snappy, zlib, lz4, zstd, liburing
+add_contrib (nuraft-cmake NuRaft)
+add_contrib (fast_float-cmake fast_float)
+add_contrib (idna-cmake idna)
+add_contrib (datasketches-cpp-cmake datasketches-cpp)
+add_contrib (sqids-cpp-cmake sqids-cpp)
 
-# TODO: refactor the contrib libraries below this comment.
+option(USE_MONGODB "Enable MongoDB support" ${ENABLE_LIBRARIES})
+if (USE_MONGODB)
+    add_contrib (mongo-c-driver-cmake mongo-c-driver) # requires: zlib
+    add_contrib (mongo-cxx-driver-cmake mongo-cxx-driver) # requires: libmongoc, libbson
+endif()
 
-if (USE_INTERNAL_ZSTD_LIBRARY)
-    add_subdirectory (zstd-cmake)
+add_contrib (libstemmer-c-cmake libstemmer_c)
+
+option(ENABLE_NLP "Enable NLP functions support" ${ENABLE_LIBRARIES})
+if (ENABLE_NLP)
+    add_contrib (wordnet-blast-cmake wordnet-blast)
+    add_contrib (lemmagen-c-cmake lemmagen-c)
+    add_contrib (cld2-cmake cld2)
+endif()
+
+add_contrib (sqlite-cmake sqlite-amalgamation)
+add_contrib (s2geometry-cmake s2geometry)
+add_contrib (c-ares-cmake c-ares)
+
+add_contrib (morton-nd-cmake morton-nd)
+if (ARCH_S390X)
+    add_contrib(crc32-s390x-cmake crc32-s390x)
+endif()
+
+option(ENABLE_SIMSIMD "Enable SimSIMD" ${ENABLE_LIBRARIES})
+if (ENABLE_SIMSIMD)
+    add_contrib (SimSIMD-cmake SimSIMD)
+else ()
+    message(STATUS "Not using SimSIMD")
 endif ()
 
-if (USE_INTERNAL_RE2_LIBRARY)
-    add_subdirectory (re2-cmake)
-endif ()
-
-if (USE_INTERNAL_DOUBLE_CONVERSION_LIBRARY)
-    add_subdirectory (double-conversion-cmake)
-endif ()
-
-if (USE_INTERNAL_CITYHASH_LIBRARY)
-    add_subdirectory (cityhash102)
-endif ()
-
-if (USE_INTERNAL_FARMHASH_LIBRARY)
-    add_subdirectory (libfarmhash)
-endif ()
-
-if (USE_INTERNAL_ZLIB_LIBRARY)
-    if (INTERNAL_ZLIB_NAME STREQUAL "zlib-ng")
-        add_subdirectory (zlib-ng-cmake)
-    else ()
-        add_subdirectory (${INTERNAL_ZLIB_NAME})
-    endif ()
-endif ()
-
-if (USE_INTERNAL_H3_LIBRARY)
-    add_subdirectory(h3-cmake)
-endif ()
-
-if (USE_INTERNAL_SSL_LIBRARY)
-    add_subdirectory (boringssl-cmake)
-
-    add_library(OpenSSL::Crypto ALIAS crypto)
-    add_library(OpenSSL::SSL ALIAS ssl)
-endif ()
-
-if (USE_INTERNAL_LDAP_LIBRARY)
-    add_subdirectory (openldap-cmake)
-endif ()
-
-if (USE_INTERNAL_MYSQL_LIBRARY)
-    add_subdirectory (mariadb-connector-c-cmake)
-endif ()
-
-if (USE_INTERNAL_RDKAFKA_LIBRARY)
-    add_subdirectory (librdkafka-cmake)
-    target_include_directories(rdkafka BEFORE PRIVATE ${ZLIB_INCLUDE_DIR})
-    if(OPENSSL_INCLUDE_DIR)
-        target_include_directories(rdkafka BEFORE PRIVATE ${OPENSSL_INCLUDE_DIR})
+option(ENABLE_USEARCH "Enable USearch" ${ENABLE_LIBRARIES})
+if (ENABLE_USEARCH)
+    add_contrib (FP16-cmake FP16)
+    if (NOT ENABLE_SIMSIMD)
+        add_contrib (SimSIMD-cmake SimSIMD)
     endif()
+    add_contrib (usearch-cmake usearch) # requires: FP16, SimdSIMD
+else ()
+    message(STATUS "Not using USearch")
 endif ()
 
-if (USE_RDKAFKA)
-    add_subdirectory (cppkafka-cmake)
+add_contrib (xxHash-cmake xxHash)
+
+add_contrib (libbcrypt-cmake libbcrypt)
+
+add_contrib (google-benchmark-cmake google-benchmark)
+add_contrib (ulid-c-cmake ulid-c)
+
+add_contrib (libssh-cmake libssh)
+
+add_contrib (prometheus-protobufs-cmake prometheus-protobufs prometheus-protobufs-gogo)
+add_contrib (antlr4-cpp-runtime-cmake antlr4-cpp-runtime)
+add_contrib (antlr4-grammars-cmake antlr4-grammars)
+
+add_contrib(simdcomp-cmake simdcomp)
+
+add_contrib (numactl-cmake numactl)
+
+# Google Cloud Cpp
+if(ENABLE_LIBRARIES AND (OS_LINUX OR OS_DARWIN OR OS_FREEBSD) AND (ARCH_AMD64 OR (ARCH_AARCH64 AND NOT NO_ARMV81_OR_HIGHER)))
+    set(ENABLE_GOOGLE_CLOUD_CPP_DEFAULT ON)
+else()
+    set(ENABLE_GOOGLE_CLOUD_CPP_DEFAULT OFF)
+endif()
+option(ENABLE_GOOGLE_CLOUD_CPP "Enable Google Cloud Cpp" ${ENABLE_GOOGLE_CLOUD_CPP_DEFAULT})
+if(ENABLE_GOOGLE_CLOUD_CPP)
+    add_contrib (nlohmann-json-cmake nlohmann-json)
+    add_contrib (crc32c-cmake crc32c)
+    add_contrib (google-cloud-cpp-cmake google-cloud-cpp) # requires grpc, protobuf, absl, nlohmann's json, crc32c
+else()
+    message(STATUS "Not using Google Cloud Cpp")
 endif()
 
-if (ENABLE_ICU AND USE_INTERNAL_ICU_LIBRARY)
-    add_subdirectory (icu-cmake)
-endif ()
+add_contrib (jwt-cpp-cmake jwt-cpp)
 
-if(USE_INTERNAL_SNAPPY_LIBRARY)
-    set(SNAPPY_BUILD_TESTS 0 CACHE INTERNAL "")
+add_contrib (sha3iuf-cmake SHA3IUF)
 
-    add_subdirectory(snappy-cmake)
+add_contrib (ai-sdk-cpp-cmake ai-sdk-cpp)
 
-    set (SNAPPY_INCLUDE_DIR "${ClickHouse_SOURCE_DIR}/contrib/snappy")
-endif()
+add_contrib (bech32)
 
-if (USE_INTERNAL_PARQUET_LIBRARY)
-    # We dont use arrow's cmakefiles because they uses too many depends and download some libs in compile time
-    # But you can update auto-generated parquet files manually:
-    # cd {BUILD_DIR}/contrib/arrow/cpp/src/parquet && mkdir -p build && cd build
-    # cmake .. -DARROW_COMPUTE=ON -DARROW_PARQUET=ON -DARROW_SIMD_LEVEL=NONE -DARROW_VERBOSE_THIRDPARTY_BUILD=ON
-    #          -DARROW_BUILD_SHARED=1 -DARROW_BUILD_UTILITIES=OFF -DARROW_BUILD_INTEGRATION=OFF
-    #          -DBoost_FOUND=1 -DARROW_TEST_LINKAGE="shared"
-    # make -j8
-    # copy {BUILD_DIR}/contrib/arrow/cpp/src/parquet/*.cpp,*.h -> {BUILD_DIR}/contrib/arrow-cmake/cpp/src/parquet/
+add_contrib (libcotp-cmake libcotp)
 
-    # Also useful parquet reader:
-    # cd {BUILD_DIR}/contrib/arrow/cpp && mkdir -p build && cd build
-    # cmake .. -DARROW_PARQUET=1 -DARROW_WITH_SNAPPY=1 -DPARQUET_BUILD_EXECUTABLES=1
-    # make -j8
-    # {BUILD_DIR}/contrib/arrow/cpp/build/release/parquet-reader some_file.parquet
-
-    add_subdirectory(arrow-cmake)
-
-    # The library is large - avoid bloat.
-    target_compile_options (${ARROW_LIBRARY} PRIVATE -g0)
-    target_compile_options (${THRIFT_LIBRARY} PRIVATE -g0)
-    target_compile_options (${PARQUET_LIBRARY} PRIVATE -g0)
-endif()
-
-if (USE_INTERNAL_AVRO_LIBRARY)
-    add_subdirectory(avro-cmake)
-endif()
-
-if(USE_INTERNAL_GTEST_LIBRARY)
-    add_subdirectory(googletest-cmake)
-elseif(GTEST_SRC_DIR)
-    add_subdirectory(${GTEST_SRC_DIR}/googletest ${CMAKE_CURRENT_BINARY_DIR}/googletest)
-    target_compile_definitions(gtest INTERFACE GTEST_HAS_POSIX_RE=0)
-endif()
-
-function(add_llvm)
-    # ld: unknown option: --color-diagnostics
-    if (APPLE)
-        set (LINKER_SUPPORTS_COLOR_DIAGNOSTICS 0 CACHE INTERNAL "")
-    endif ()
-
-    # Do not adjust RPATH in llvm, since then it will not be able to find libcxx/libcxxabi/libunwind
-    set (CMAKE_INSTALL_RPATH "ON")
-    set (LLVM_COMPILER_CHECKED 1 CACHE INTERNAL "")
-    set (LLVM_ENABLE_EH 1 CACHE INTERNAL "")
-    set (LLVM_ENABLE_RTTI 1 CACHE INTERNAL "")
-    set (LLVM_ENABLE_PIC 0 CACHE INTERNAL "")
-    set (LLVM_TARGETS_TO_BUILD "X86;AArch64" CACHE STRING "")
-
-    # Need to use C++17 since the compilation is not possible with C++20 currently, due to ambiguous operator != etc.
-    # LLVM project will set its default value for the -std=... but our global setting from CMake will override it.
-    set (CMAKE_CXX_STANDARD 17)
-
-    add_subdirectory (llvm/llvm)
-endfunction()
-if (USE_EMBEDDED_COMPILER)
-    add_llvm()
-endif ()
-
-if (USE_INTERNAL_LIBGSASL_LIBRARY)
-    add_subdirectory(libgsasl-cmake)
-endif()
-
-if (USE_INTERNAL_LIBXML2_LIBRARY)
-    add_subdirectory(libxml2-cmake)
-endif ()
-
-if (USE_INTERNAL_BROTLI_LIBRARY)
-    add_subdirectory(brotli-cmake)
-    target_compile_definitions(brotli PRIVATE BROTLI_BUILD_PORTABLE=1)
-endif ()
-
-if (USE_INTERNAL_PROTOBUF_LIBRARY)
-    add_subdirectory(protobuf-cmake)
-endif ()
-
-if (USE_INTERNAL_HDFS3_LIBRARY)
-    add_subdirectory(libhdfs3-cmake)
-endif ()
-
-if (USE_INTERNAL_GRPC_LIBRARY)
-    add_subdirectory(grpc-cmake)
-endif ()
-
-if (USE_INTERNAL_AWS_S3_LIBRARY)
-    add_subdirectory(aws-s3-cmake)
-
-    # The library is large - avoid bloat.
-    target_compile_options (aws_s3 PRIVATE -g0)
-    target_compile_options (aws_s3_checksums PRIVATE -g0)
-
-endif ()
-
-if (USE_BASE64)
-    add_subdirectory (base64-cmake)
-endif()
-
-if (USE_SIMDJSON)
-    add_subdirectory (simdjson-cmake)
-endif()
-
-if (USE_FASTOPS)
-    add_subdirectory (fastops-cmake)
-endif()
-
-if (USE_AMQPCPP OR USE_CASSANDRA)
-    add_subdirectory (libuv-cmake)
-endif()
-if (USE_AMQPCPP)
-    add_subdirectory (amqpcpp-cmake)
-endif()
-if (USE_CASSANDRA)
-    add_subdirectory (cassandra-cmake)
-endif()
-
-# Should go before:
-# - sentry-native
-add_subdirectory (curl-cmake)
-
-if (USE_INTERNAL_AZURE_BLOB_STORAGE_LIBRARY)
-    add_subdirectory(azure-cmake)
-endif()
-
-if (USE_SENTRY)
-    add_subdirectory (sentry-native-cmake)
-endif()
-
-add_subdirectory (fmtlib-cmake)
-
-if (USE_KRB5)
-    add_subdirectory (krb5-cmake)
-    if (USE_CYRUS_SASL)
-        add_subdirectory (cyrus-sasl-cmake)
-    endif()
-endif()
-
-if (USE_INTERNAL_ROCKSDB_LIBRARY)
-    add_subdirectory(rocksdb-cmake)
-endif()
-
-if (USE_LIBPQXX)
-    add_subdirectory (libpq-cmake)
-    add_subdirectory (libpqxx-cmake)
-endif()
-
-if (USE_NURAFT)
-  add_subdirectory(nuraft-cmake)
-endif()
-
-add_subdirectory(fast_float-cmake)
-
-if (USE_NLP)
-    add_subdirectory(libstemmer-c-cmake)
-    add_subdirectory(wordnet-blast-cmake)
-    add_subdirectory(lemmagen-c-cmake)
-endif()
-
-if (USE_BZIP2)
-    add_subdirectory(bzip2-cmake)
-endif()
-
-if (USE_SQLITE)
-    add_subdirectory(sqlite-cmake)
-endif()
-
-if (USE_S2_GEOMETRY)
-    add_subdirectory(s2geometry-cmake)
-endif()
+add_contrib (clickstack-cmake clickstack)
 
 # Put all targets defined here and in subdirectories under "contrib/<immediate-subdir>" folders in GUI-based IDEs.
 # Some of third-party projects may override CMAKE_FOLDER or FOLDER property of their targets, so they would not appear

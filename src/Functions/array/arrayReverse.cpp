@@ -30,6 +30,7 @@ public:
 
     size_t getNumberOfArguments() const override { return 1; }
     bool useDefaultImplementationForConstants() const override { return true; }
+    bool isInjective(const ColumnsWithTypeAndName &) const override { return true; }
 
     bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo & /*arguments*/) const override { return true; }
 
@@ -37,8 +38,7 @@ public:
     {
         const DataTypeArray * array_type = checkAndGetDataType<DataTypeArray>(arguments[0].get());
         if (!array_type)
-            throw Exception("Argument for function " + getName() + " must be array.",
-                ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
+            throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Argument for function {} must be array.", getName());
 
         return arguments[0];
     }
@@ -59,8 +59,8 @@ ColumnPtr FunctionArrayReverse::executeImpl(const ColumnsWithTypeAndName & argum
 {
     const ColumnArray * array = checkAndGetColumn<ColumnArray>(arguments[0].column.get());
     if (!array)
-        throw Exception("Illegal column " + arguments[0].column->getName() + " of first argument of function " + getName(),
-            ErrorCodes::ILLEGAL_COLUMN);
+        throw Exception(ErrorCodes::ILLEGAL_COLUMN, "Illegal column {} of first argument of function {}",
+            arguments[0].column->getName(), getName());
 
     auto res_ptr = array->cloneEmpty();
     ColumnArray & res = assert_cast<ColumnArray &>(*res_ptr);
@@ -92,11 +92,12 @@ ColumnPtr FunctionArrayReverse::executeImpl(const ColumnsWithTypeAndName & argum
         || executeFixedString(*src_inner_col, offsets, *res_inner_col)
         || executeGeneric(*src_inner_col, offsets, *res_inner_col);
 
+    chassert(bool(src_nullable_col) == bool(res_nullable_col));
+
     if (src_nullable_col)
         if (!executeNumber<UInt8>(src_nullable_col->getNullMapColumn(), offsets, res_nullable_col->getNullMapColumn()))
-            throw Exception("Illegal column " + src_nullable_col->getNullMapColumn().getName()
-                + " of null map of the first argument of function " + getName(),
-                ErrorCodes::ILLEGAL_COLUMN);
+            throw Exception(ErrorCodes::ILLEGAL_COLUMN, "Illegal column {} of null map of the first argument of function {}",
+                src_nullable_col->getNullMapColumn().getName(), getName());
 
     return res_ptr;
 }
@@ -112,7 +113,7 @@ bool FunctionArrayReverse::executeGeneric(const IColumn & src_data, const Column
     {
         ssize_t src_index = src_array_offsets[i] - 1;
 
-        while (src_index >= ssize_t(src_prev_offset))
+        while (src_index >= static_cast<ssize_t>(src_prev_offset))
         {
             res_data.insertFrom(src_data, src_index);
             --src_index;
@@ -158,8 +159,7 @@ bool FunctionArrayReverse::executeNumber(const IColumn & src_data, const ColumnA
 
         return true;
     }
-    else
-        return false;
+    return false;
 }
 
 bool FunctionArrayReverse::executeFixedString(const IColumn & src_data, const ColumnArray::Offsets & src_offsets, IColumn & res_data)
@@ -196,8 +196,7 @@ bool FunctionArrayReverse::executeFixedString(const IColumn & src_data, const Co
         }
         return true;
     }
-    else
-        return false;
+    return false;
 }
 
 bool FunctionArrayReverse::executeString(const IColumn & src_data, const ColumnArray::Offsets & src_array_offsets, IColumn & res_data)
@@ -242,14 +241,31 @@ bool FunctionArrayReverse::executeString(const IColumn & src_data, const ColumnA
 
         return true;
     }
-    else
-        return false;
+    return false;
 }
 
 
-void registerFunctionArrayReverse(FunctionFactory & factory)
+REGISTER_FUNCTION(ArrayReverse)
 {
-    factory.registerFunction<FunctionArrayReverse>();
+    FunctionDocumentation::Description description = R"(
+Reverses the order of elements of a given array.
+
+:::note
+Function `reverse(arr)` performs the same functionality but works on other data-types
+in addition to Arrays.
+:::
+)";
+    FunctionDocumentation::Syntax syntax = "arrayReverse(arr)";
+    FunctionDocumentation::Arguments arguments = {
+        {"arr", "The array to reverse.", {"Array(T)"}}
+    };
+    FunctionDocumentation::ReturnedValue returned_value = {"Returns an array of the same size as the original array containing the elements in reverse order", {"Array(T)"}};
+    FunctionDocumentation::Examples examples = {{"Usage example", "SELECT arrayReverse([1, 2, 3])", "[3,2,1]"}};
+    FunctionDocumentation::IntroducedIn introduced_in = {1, 1};
+    FunctionDocumentation::Category category = FunctionDocumentation::Category::Array;
+    FunctionDocumentation documentation = {description, syntax, arguments, {}, returned_value, examples, introduced_in, category};
+
+    factory.registerFunction<FunctionArrayReverse>(documentation);
 }
 
 }

@@ -3,10 +3,6 @@
 #include <DataTypes/IDataType.h>
 #include <DataTypes/EnumValues.h>
 #include <Columns/ColumnVector.h>
-#include <Columns/ColumnConst.h>
-#include <Common/HashTable/HashMap.h>
-#include <vector>
-#include <unordered_map>
 
 
 namespace DB
@@ -38,6 +34,7 @@ class DataTypeEnum final : public IDataTypeEnum, public EnumValues<Type>
 public:
     using FieldType = Type;
     using ColumnType = ColumnVector<FieldType>;
+    static constexpr auto type_id = sizeof(FieldType) == 1 ? TypeIndex::Enum8 : TypeIndex::Enum16;
     using typename EnumValues<Type>::Values;
 
     static constexpr bool is_parametric = true;
@@ -52,14 +49,8 @@ public:
     std::string doGetName() const override { return type_name; }
     const char * getFamilyName() const override;
 
-    TypeIndex getTypeId() const override { return sizeof(FieldType) == 1 ? TypeIndex::Enum8 : TypeIndex::Enum16; }
-
-    FieldType readValue(ReadBuffer & istr) const
-    {
-        FieldType x;
-        readText(x, istr);
-        return this->findByValue(x)->first;
-    }
+    TypeIndex getTypeId() const override { return type_id; }
+    TypeIndex getColumnType() const override { return sizeof(FieldType) == 1 ? TypeIndex::Int8 : TypeIndex::Int16; }
 
     Field castToName(const Field & value_or_name) const override;
     Field castToValue(const Field & value_or_name) const override;
@@ -67,6 +58,7 @@ public:
     MutableColumnPtr createColumn() const override { return ColumnType::create(); }
 
     Field getDefault() const override;
+    Type getDefaultValue() const;
     void insertDefaultInto(IColumn & column) const override;
 
     bool equals(const IDataType & rhs) const override;
@@ -80,7 +72,9 @@ public:
     /// Enum('a' = 1, 'b' = 2) -> Enum('a' = 2, 'b' = 1) NOT OK
     bool contains(const IDataType & rhs) const override;
 
-    SerializationPtr doGetDefaultSerialization() const override;
+    SerializationPtr doGetSerialization(const SerializationInfoSettings & settings) const override;
+
+    void updateHashImpl(SipHash & hash) const override;
 };
 
 
